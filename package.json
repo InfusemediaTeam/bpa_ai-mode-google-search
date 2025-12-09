@@ -1,8 +1,8 @@
 {
-  "name": "universal-prompt-service",
+  "name": "bpa_ai-mode-google-search",
   "version": "1.0.0",
   "description": "Universal Prompt Service - NestJS service for processing prompts via worker pool",
-  "author": "",
+  "author": "Titishev Yevhen",
   "private": true,
   "license": "UNLICENSED",
   "scripts": {
