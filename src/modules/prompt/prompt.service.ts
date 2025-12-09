@@ -10,8 +10,8 @@ export interface PromptJobData {
 }
 
 export interface PromptJobResult {
-  text: string;
-  html?: string;
+  json: string;
+  raw_text?: string;
   usedWorker?: number;
 }
 

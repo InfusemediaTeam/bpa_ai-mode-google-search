@@ -46,20 +46,21 @@ export class TimeoutsService {
 
   get retry() {
     return {
-      /** Max retry attempts before giving up */
+      /** Max retry attempts for worker failures */
       maxAttempts: this.getInt('RETRY_MAX_ATTEMPTS', 3),
-      /** Initial delay between retries (ms) */
-      initialDelayMs: this.getInt('RETRY_INITIAL_DELAY_MS', 1000),
-      /** Maximum delay between retries (ms) */
-      maxDelayMs: this.getInt('RETRY_MAX_DELAY_MS', 30000),
-      /** Maximum time to wait for a healthy worker (ms) */
-      waitForWorkerMaxMs: this.getInt('RETRY_WAIT_FOR_WORKER_MAX_MS', 300000),
-      /** Interval between health checks when waiting for worker (ms) */
-      healthCheckIntervalMs: this.getInt('RETRY_HEALTH_CHECK_INTERVAL_MS', 5000),
+      /** Delay between retry attempts (ms) */
+      delayMs: this.getInt('RETRY_DELAY_MS', 1000),
     };
   }
 
   get jobResultsTtlSec(): number {
     return this.getInt('JOB_RESULTS_TTL_SEC', 86400);
+  }
+
+  /** Number of workers from WORKER_BASE_URLS */
+  get workerCount(): number {
+    const urls = this.configService.get<string>('WORKER_BASE_URLS') || '';
+    const count = urls.split(',').filter(Boolean).length;
+    return count > 0 ? count : 3;
   }
 }

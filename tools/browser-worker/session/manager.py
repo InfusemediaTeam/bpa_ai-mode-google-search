@@ -260,7 +260,22 @@ class SessionManager:
                     else:
                         print("[IDENTITY] AI Mode not ready; retrying…")
                 except Exception as e:
+                    error_msg = str(e)
                     print(f"[IDENTITY] launch failed: {e}")
+                    
+                    # If Chrome crashed, clean the entire profile to fix corruption
+                    if "Chrome instance exited" in error_msg or "session not created" in error_msg:
+                        print(f"[IDENTITY] Chrome crashed - cleaning corrupted profile: {profile}")
+                        import shutil
+                        try:
+                            if profile.exists():
+                                shutil.rmtree(profile, ignore_errors=True)
+                            # Create fresh empty profile directory
+                            profile.mkdir(parents=True, exist_ok=True)
+                            print(f"[IDENTITY] Profile cleaned and recreated: {profile}")
+                        except Exception as clean_err:
+                            print(f"[IDENTITY] Failed to clean profile: {clean_err}")
+                            
                 import time
                 time.sleep(0.5 + attempt * 0.5)
             
@@ -479,7 +494,21 @@ class SessionManager:
                     else:
                         print("[IDENTITY] AI Mode not ready; retrying…")
                 except Exception as e:
+                    error_msg = str(e)
                     print(f"[IDENTITY] launch failed: {e}")
+                    
+                    # If Chrome crashed, clean the entire profile to fix corruption
+                    if "Chrome instance exited" in error_msg or "session not created" in error_msg:
+                        print(f"[IDENTITY] Chrome crashed - cleaning corrupted profile: {profile}")
+                        import shutil
+                        try:
+                            if profile.exists():
+                                shutil.rmtree(profile, ignore_errors=True)
+                            profile.mkdir(parents=True, exist_ok=True)
+                            print(f"[IDENTITY] Profile cleaned and recreated: {profile}")
+                        except Exception as clean_err:
+                            print(f"[IDENTITY] Failed to clean profile: {clean_err}")
+                            
                 import time
                 time.sleep(0.5 + attempt * 0.5)
             
@@ -558,7 +587,21 @@ class SessionManager:
                     else:
                         print("[IDENTITY] AI Mode not ready; retrying…")
                 except Exception as e:
+                    error_msg = str(e)
                     print(f"[IDENTITY] launch failed: {e}")
+                    
+                    # If Chrome crashed, clean the entire profile to fix corruption
+                    if "Chrome instance exited" in error_msg or "session not created" in error_msg:
+                        print(f"[IDENTITY] Chrome crashed - cleaning corrupted profile: {profile}")
+                        import shutil
+                        try:
+                            if profile.exists():
+                                shutil.rmtree(profile, ignore_errors=True)
+                            profile.mkdir(parents=True, exist_ok=True)
+                            print(f"[IDENTITY] Profile cleaned and recreated: {profile}")
+                        except Exception as clean_err:
+                            print(f"[IDENTITY] Failed to clean profile: {clean_err}")
+                            
                 import time
                 time.sleep(0.5 + attempt * 0.5)
             

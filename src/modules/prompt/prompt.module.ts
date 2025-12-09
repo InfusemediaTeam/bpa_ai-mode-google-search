@@ -1,10 +1,11 @@
 import { Module } from '@nestjs/common';
 import { BullModule } from '@nestjs/bull';
-import { ConfigModule, ConfigService } from '@nestjs/config';
+import { ConfigModule } from '@nestjs/config';
 import { PromptController } from './prompt.controller';
 import { PromptService } from './prompt.service';
 import { PromptProcessor } from './prompt.processor';
 import { WorkerModule } from '../worker/worker.module';
+import { AppConfigModule } from '../../config/config.module';
 import { TimeoutsService } from '../../config/timeouts';
 
 @Module({
@@ -12,26 +13,25 @@ import { TimeoutsService } from '../../config/timeouts';
     WorkerModule,
     BullModule.registerQueueAsync({
       name: 'prompt',
-      imports: [ConfigModule],
-      inject: [ConfigService],
-      useFactory: (configService: ConfigService) => {
-        const jobTtl = configService.get<number>('JOB_RESULTS_TTL_SEC') || 86400;
-        const searchTimeout = configService.get<number>('BULL_SEARCH_TIMEOUT_MS') || 60000;
-        
+      imports: [ConfigModule, AppConfigModule],
+      inject: [TimeoutsService],
+      useFactory: (timeouts: TimeoutsService) => {
         return {
           settings: {
             stalledInterval: 30000,
             maxStalledCount: 10,
           },
+          // Note: concurrency is set in @Process decorator (processor.ts)
+          // limiter would limit rate (jobs/sec), not parallelism
           defaultJobOptions: {
-            removeOnComplete: { age: jobTtl },
-            removeOnFail: { age: jobTtl },
+            removeOnComplete: { age: timeouts.jobResultsTtlSec },
+            removeOnFail: { age: timeouts.jobResultsTtlSec },
             attempts: 3,
             backoff: {
               type: 'exponential',
               delay: 5000,
             },
-            timeout: searchTimeout,
+            timeout: timeouts.bull.searchJobMs,
           },
         };
       },

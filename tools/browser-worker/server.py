@@ -252,17 +252,35 @@ async def search(req: SearchRequest, request: Request):
             if cleaned_json and not cleaned_json.strip().startswith('{'):
                 cleaned_json = extract_clean_json(cleaned_json) if cleaned_json else ""
             
-            # If no valid JSON found, return empty string (triggers fallback in API)
-            # ALWAYS include raw_text for debugging (full original response from AI)
-            result = {
-                "text": cleaned_json,
-                "raw_text": raw_text_from_ai  # Always include raw for debugging
-            }
+            # If no valid JSON found, return error with empty result
+            # Worker already did 2 retry attempts to get JSON from AI
+            if not cleaned_json:
+                duration_ms = int((time.time() - started) * 1000)
+                print(f"\n{'='*80}")
+                print(f"[API] /search RESPONSE - EMPTY RESULT")
+                print(f"[API] Duration: {duration_ms}ms")
+                print(f"[API] No valid JSON after 2 fallback attempts")
+                if raw_text_from_ai:
+                    print(f"[API] Raw text preview: {repr(raw_text_from_ai[:200])}")
+                print(f"{'='*80}\n")
+                return JSONResponse(
+                    status_code=422,
+                    content={
+                        "ok": False,
+                        "error": "empty_result",
+                        "message": "No valid JSON extracted after retries",
+                        "raw_text": raw_text_from_ai[:500] if raw_text_from_ai else None,
+                        "html": raw_result.get("html") or "",
+                        "durationMs": duration_ms
+                    }
+                )
             
-            if not cleaned_json and raw_text_from_ai:
-                print(f"[API] WARNING: No valid JSON extracted from response, returning empty string")
-                print(f"[API] Raw text preview: {raw_text_from_ai[:200]}")
-                print(f"[API] This will trigger fallback prompt in NestJS")
+            # Valid JSON found
+            result = {
+                "json": cleaned_json,
+                "html": raw_result.get("html") or "",
+                "raw_text": raw_text_from_ai  # Include raw for debugging
+            }
             
             # Increment search counter and check if rotation needed
             session_manager.search_count += 1
@@ -272,19 +290,19 @@ async def search(req: SearchRequest, request: Request):
                 session_manager.search_count = 0
             
             duration_ms = int((time.time() - started) * 1000)
-            text = result.get('text') or ''
+            json_result = result.get('json') or ''
             raw_text = result.get('raw_text') or ''
             
             print(f"\n{'='*80}")
             print(f"[API] /search RESPONSE - SUCCESS")
             print(f"[API] Duration: {duration_ms}ms")
-            print(f"[API] Valid JSON: {bool(text)}")
-            print(f"[API] Text size: {len(text)} chars")
-            if raw_text and raw_text != text:
+            print(f"[API] Valid JSON: {bool(json_result)}")
+            print(f"[API] JSON size: {len(json_result)} chars")
+            if raw_text and raw_text != json_result:
                 print(f"[API] Raw text size: {len(raw_text)} chars")
                 print(f"[API] Raw text preview: {repr(raw_text[:200])}")
-            if text:
-                print(f"[API] JSON preview: {text[:200]}")
+            if json_result:
+                print(f"[API] JSON preview: {json_result[:200]}")
             else:
                 print(f"[API] Empty response (will trigger fallback in API)")
             print(f"{'='*80}\n")

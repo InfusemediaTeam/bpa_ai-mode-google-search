@@ -190,7 +190,7 @@ def monitor_all_workers():
                 stats['failed_checks'] += 1
                 
                 # Attempt restart
-                if restart_worker(container):
+                if restart_worker(container, docker_client):
                     healthy_workers.append(container.name)
                     unhealthy_workers.remove(container.name)
         

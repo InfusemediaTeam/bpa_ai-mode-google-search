@@ -8,8 +8,7 @@ import { ConfigService } from '@nestjs/config';
 import { TimeoutsService } from '../../config/timeouts';
 
 export interface SearchResult {
-  text: string;
-  html: string;
+  json: string;
   raw_text?: string;
 }
 
@@ -87,8 +86,17 @@ export class WorkerClientService implements OnModuleInit {
       this.logger.debug(`Requesting ${url}`);
       const r = await fetch(url, { ...(init || {}), signal: controller.signal } as RequestInit);
       if (!r.ok) {
-        const text = await r.text();
-        return { ok: false, error: `HTTP ${r.status} - ${text?.slice(0, 200)}`, status: r.status };
+        // Try to parse JSON body for error responses (e.g., 422 with raw_text)
+        let value: any = undefined;
+        let errorText = '';
+        try {
+          const text = await r.text();
+          value = JSON.parse(text);
+          errorText = value?.error || value?.message || text?.slice(0, 200);
+        } catch {
+          errorText = 'Failed to parse error response';
+        }
+        return { ok: false, value, error: `HTTP ${r.status} - ${errorText}`, status: r.status };
       }
       const value = expectJson ? ((await r.json()) as T) : ((await r.text()) as unknown as T);
       return { ok: true, value, status: r.status };
@@ -189,6 +197,14 @@ export class WorkerClientService implements OnModuleInit {
         throw error;
       }
       
+      // Empty result (422) - include raw_text in error for fallback
+      if (res.status === 422 && res.value?.error === 'empty_result') {
+        const error = new Error(`Worker ${worker || 1}: HTTP 422 - empty_result`);
+        const val = res.value as any;
+        (error as any).raw_text = val.raw_text || '';
+        throw error;
+      }
+      
       this.logger.error(`Search failed on worker ${worker || 1}: ${res.error || 'no details'}`);
       throw new Error(`Worker error (worker=${worker || 1}): ${res.error || 'request failed'}`);
     }
@@ -200,183 +216,62 @@ export class WorkerClientService implements OnModuleInit {
   }
 
   /**
-   * Wait for at least one healthy worker to become available
-   */
-  private async waitForHealthyWorker(timeoutMs: number): Promise<number> {
-    const startTime = Date.now();
-    const workerCount = this.getWorkerCount();
-    let attempt = 0;
-    
-    while (Date.now() - startTime < timeoutMs) {
-      attempt++;
-      this.logger.log(`Checking for healthy workers (attempt ${attempt})...`);
-      
-      for (let i = 1; i <= workerCount; i++) {
-        try {
-          const healthResult = await this.health(i);
-          if (healthResult.ok && healthResult.ready) {
-            this.logger.log(`Worker ${i} is healthy and ready`);
-            return i;
-          }
-        } catch (err) {
-          // Continue checking other workers
-        }
-      }
-      
-      const remainingTime = timeoutMs - (Date.now() - startTime);
-      if (remainingTime > 0) {
-        const waitTime = Math.min(this.timeouts.retry.healthCheckIntervalMs, remainingTime);
-        this.logger.warn(`No healthy workers found, waiting ${waitTime}ms before retry...`);
-        await new Promise(resolve => setTimeout(resolve, waitTime));
-      }
-    }
-    
-    throw new Error(`No healthy workers available after ${Math.round(timeoutMs / 1000)}s timeout`);
-  }
-
-  /**
-   * Search with retry logic and worker failover
-   * - Tries preferred worker first, then others
-   * - If all workers fail, waits for workers to recover
-   * - Keeps retrying until success or max wait time
+   * Search - try workers sequentially until one accepts
+   * 
+   * Workers return 423 instantly if busy, so sequential check is fast.
+   * Bull handles concurrency - multiple jobs run in parallel on different workers.
+   * 
+   * NO retry when:
+   * - Worker returned result (even empty) - 422 empty_result → job completes
+   * - Worker is blocked by Google - 503 → job fails
    */
   async searchWithRetry(
     prompt: string, 
-    preferredWorker?: number, 
-    options?: {
-      maxAttempts?: number;
-      waitForRecovery?: boolean;
-      maxWaitMs?: number;
-    }
+    _preferredWorker?: number,
   ): Promise<SearchResult & { usedWorker: number }> {
-    const maxAttempts = options?.maxAttempts ?? this.timeouts.retry.maxAttempts;
-    const waitForRecovery = options?.waitForRecovery ?? true;
-    const maxWaitMs = options?.maxWaitMs ?? this.timeouts.retry.waitForWorkerMaxMs;
-    
-    const errors: Array<{ worker: number; attempt: number; error: string; timestamp: Date }> = [];
     const workerCount = this.getWorkerCount();
-    const startTime = Date.now();
+    let lastError: Error | null = null;
     
-    // Build list of workers to try
-    const workersToTry: number[] = [];
-    if (preferredWorker && preferredWorker >= 1 && preferredWorker <= workerCount) {
-      workersToTry.push(preferredWorker);
-    }
-    // Add other workers in sequence
+    // Try each worker - busy workers return 423 instantly
     for (let i = 1; i <= workerCount; i++) {
-      if (i !== preferredWorker) {
-        workersToTry.push(i);
-      }
-    }
-    
-    let globalAttempt = 0;
-    let delay = this.timeouts.retry.initialDelayMs;
-    
-    while (true) {
-      globalAttempt++;
-      const elapsedMs = Date.now() - startTime;
-      
-      // Check if we exceeded max wait time
-      if (waitForRecovery && elapsedMs > maxWaitMs) {
-        const errorSummary = errors.slice(-10).map(e => 
-          `[${e.timestamp.toISOString()}] worker ${e.worker} (attempt ${e.attempt}): ${e.error}`
-        ).join('\n  ');
-        throw new Error(
-          `Search failed: No healthy workers after ${Math.round(elapsedMs / 1000)}s.\n` +
-          `Last errors:\n  ${errorSummary}`
-        );
-      }
-      
-      // Try all available workers in this round
-      for (let i = 0; i < workersToTry.length; i++) {
-        const workerToUse = workersToTry[i];
+      try {
+        const result = await this.search(prompt, i);
+        this.logger.log(`Worker ${i} completed job`);
         
-        try {
-          this.logger.debug(`Search global attempt ${globalAttempt}, worker ${workerToUse} (${i + 1}/${workersToTry.length})`);
-          const result = await this.search(prompt, workerToUse);
-          
-          // Success!
-          if (globalAttempt > 1 || i > 0) {
-            this.logger.warn(
-              `Search succeeded on worker ${workerToUse} after ${globalAttempt} rounds and ${errors.length} failed attempts ` +
-              `(elapsed: ${Math.round(elapsedMs / 1000)}s)`
-            );
-          }
-          return { ...result, usedWorker: workerToUse };
-          
-        } catch (err: any) {
-          const errorMsg = err?.message || String(err);
-          const isBlocked = err?.blocked === true;
-          
-          errors.push({ 
-            worker: workerToUse, 
-            attempt: globalAttempt, 
-            error: errorMsg,
-            timestamp: new Date()
-          });
-          
-          // Check if worker is blocked - skip immediately
-          if (isBlocked) {
-            this.logger.error(
-              `Worker ${workerToUse} is BLOCKED (${errorMsg}). ` +
-              `Immediately trying next worker...`
-            );
-            continue;
-          }
-          
-          // Check if worker is busy (423 Locked) - skip to next worker immediately
-          const isBusy = errorMsg.includes('423') || errorMsg.includes('Locked') || errorMsg.includes('busy');
-          if (isBusy) {
-            this.logger.debug(`Worker ${workerToUse} is busy (423 Locked), immediately trying next worker...`);
-            continue;
-          }
-          
-          this.logger.warn(
-            `Search failed on worker ${workerToUse} ` +
-            `(global attempt ${globalAttempt}, worker attempt ${i + 1}/${workersToTry.length}): ${errorMsg}`
-          );
-          
-          // Small delay between workers in same round for other errors
-          if (i < workersToTry.length - 1) {
-            await new Promise(resolve => setTimeout(resolve, 500));
-          }
+        // If json is empty, use raw_text as fallback
+        const json = result.json || result.raw_text || '';
+        return { json, raw_text: result.raw_text, usedWorker: i };
+        
+      } catch (err: any) {
+        const errorMsg = err?.message || String(err);
+        lastError = err;
+        
+        // Empty result (422) - job completes with raw_text only, no json
+        if (errorMsg.includes('422') || errorMsg.includes('empty_result')) {
+          const rawText = err?.raw_text || '';
+          this.logger.warn(`Worker ${i} returned empty result (422), raw_text: ${rawText.length} chars`);
+          return { json: '', raw_text: rawText, usedWorker: i };
         }
-      }
-      
-      // All workers failed in this round
-      if (!waitForRecovery) {
-        const errorSummary = errors.map(e => `worker ${e.worker}: ${e.error}`).join('; ');
-        throw new Error(`All ${workerCount} workers failed (attempt ${globalAttempt}): ${errorSummary}`);
-      }
-      
-      if (globalAttempt >= maxAttempts && maxAttempts > 0) {
-        this.logger.error(`Max attempts (${maxAttempts}) reached, but will continue waiting for healthy worker...`);
-      }
-      
-      // Wait before next round with exponential backoff
-      this.logger.warn(
-        `All ${workerCount} workers failed in round ${globalAttempt}. ` +
-        `Waiting ${delay}ms before next attempt... (elapsed: ${Math.round(elapsedMs / 1000)}s)`
-      );
-      await new Promise(resolve => setTimeout(resolve, delay));
-      
-      // Exponential backoff with max limit
-      delay = Math.min(delay * 2, this.timeouts.retry.maxDelayMs);
-      
-      // Try to find a healthy worker proactively
-      if (globalAttempt % 3 === 0) {
-        try {
-          const healthyWorker = await this.waitForHealthyWorker(this.timeouts.retry.healthCheckIntervalMs);
-          this.logger.log(`Found healthy worker ${healthyWorker}, will prioritize it in next attempt`);
-          const idx = workersToTry.indexOf(healthyWorker);
-          if (idx > 0) {
-            workersToTry.splice(idx, 1);
-            workersToTry.unshift(healthyWorker);
-          }
-        } catch {
-          // No healthy workers yet, continue with retry
+        
+        // Blocked by Google - fail immediately
+        if (err?.blocked === true) {
+          throw err;
         }
+        
+        // Busy (423) or warming up (503) - try next worker instantly
+        const isBusy = errorMsg.includes('423') || errorMsg.includes('Locked') || errorMsg.includes('busy');
+        const isWarmingUp = errorMsg.includes('warming_up') || errorMsg.includes('warming up');
+        if (isBusy || isWarmingUp) {
+          this.logger.debug(`Worker ${i} is ${isBusy ? 'busy' : 'warming up'}, trying next...`);
+          continue;
+        }
+        
+        // Other error - try next worker
+        this.logger.warn(`Worker ${i} error: ${errorMsg}`);
       }
     }
+    
+    // All workers busy - throw to let Bull retry later
+    throw lastError || new Error('All workers are busy');
   }
 }
