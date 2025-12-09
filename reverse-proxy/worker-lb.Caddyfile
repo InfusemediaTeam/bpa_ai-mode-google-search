@@ -1,0 +1,28 @@
+:4101 {
+	encode gzip
+	reverse_proxy {
+		to browser-worker:4101
+		to browser-worker-2:4101
+		to browser-worker-3:4101
+		to browser-worker-4:4101
+		to browser-worker-5:4101
+		to browser-worker-6:4101
+		to browser-worker-7:4101
+		to browser-worker-8:4101
+		to browser-worker-9:4101
+		to browser-worker-10:4101
+		to browser-worker-11:4101
+		to browser-worker-12:4101
+		to browser-worker-13:4101
+		to browser-worker-14:4101
+		to browser-worker-15:4101
+		to browser-worker-16:4101
+		to browser-worker-17:4101
+		to browser-worker-18:4101
+		to browser-worker-19:4101
+		to browser-worker-20:4101
+		lb_policy round_robin
+		lb_try_duration 10s
+		lb_try_interval 250ms
+	}
+}

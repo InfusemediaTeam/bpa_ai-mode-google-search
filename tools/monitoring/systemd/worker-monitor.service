@@ -1,0 +1,19 @@
+[Unit]
+Description=Google Search AI Worker Health Monitor
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/google-search-ai-mode
+Environment=CHECK_INTERVAL=30
+Environment=DOCKER_COMPOSE_FILE=docker-compose.yml
+ExecStart=/home/ubuntu/google-search-ai-mode/monitor-workers.sh
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

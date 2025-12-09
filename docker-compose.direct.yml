@@ -1,0 +1,74 @@
+# comments: English only
+# Development override to run without Nginx reverse-proxy (no TLS)
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.direct.yml up -d
+# This overrides ports for direct host access and does NOT start reverse-proxy.
+
+services:
+  proxy-coordinator:
+    ports:
+      - "4200:4200"   # direct HTTP access to proxy coordinator
+  api:
+    ports:
+      - "4001:4001"   # direct HTTP access to API
+  browser-worker:
+    ports:
+      - "3001:3001"   # noVNC
+      - "4101:4101"   # worker API for local NestJS
+      - "5901:5901"   # native VNC
+  browser-worker-2:
+    ports:
+      - "3002:3001"   # noVNC
+      - "4102:4101"   # worker API for local NestJS
+  browser-worker-3:
+    ports:
+      - "3003:3001"   # noVNC
+      - "4103:4101"   # worker API for local NestJS
+  browser-worker-4:
+    ports:
+      - "3004:3001"   # noVNC
+      - "4104:4101"   # worker API for local NestJS
+  browser-worker-5:
+    ports:
+      - "3005:3001"   # noVNC
+      - "4105:4101"   # worker API for local NestJS
+  browser-worker-6:
+    ports:
+      - "3006:3001"   # noVNC
+      - "4106:4101"   # worker API for local NestJS
+  browser-worker-7:
+    ports:
+      - "3007:3001"   # noVNC
+      - "4107:4101"   # worker API for local NestJS
+  browser-worker-8:
+    ports:
+      - "3008:3001"   # noVNC
+      - "4108:4101"   # worker API for local NestJS
+  browser-worker-9:
+    ports:
+      - "3009:3001"   # noVNC
+      - "4109:4101"   # worker API for local NestJS
+  browser-worker-10:
+    ports:
+      - "3010:3001"   # noVNC
+      - "4110:4101"   # worker API for local NestJS
+  browser-worker-11:
+    ports:
+      - "3011:3001"   # noVNC
+      - "4111:4101"   # worker API for local NestJS
+  browser-worker-12:
+    ports:
+      - "3012:3001"   # noVNC
+      - "4112:4101"   # worker API for local NestJS
+  browser-worker-13:
+    ports:
+      - "3013:3001"   # noVNC
+      - "4113:4101"   # worker API for local NestJS
+  browser-worker-14:
+    ports:
+      - "3014:3001"   # noVNC
+      - "4114:4101"   # worker API for local NestJS
+  browser-worker-15:
+    ports:
+      - "3015:3001"   # noVNC
+      - "4115:4101"   # worker API for local NestJS

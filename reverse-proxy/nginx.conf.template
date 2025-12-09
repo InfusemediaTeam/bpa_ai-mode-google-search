@@ -1,0 +1,159 @@
+# Nginx reverse proxy for email validator stack (templated)
+# Variables substituted at container start via envsubst:
+#   - DOMAIN
+#   - CERT_FULLCHAIN
+#   - CERT_PRIVKEY
+#   - API_PORT
+# Serves:
+#   - HTTP :80 for ACME HTTP-01
+#   - HTTPS :${API_PORT} -> api:4001
+#   - HTTPS :3000        -> chromium:3000 (noVNC)
+#   - HTTPS :3101        -> chromium:3101 (watcher)
+
+user  nginx;
+worker_processes  auto;
+
+error_log  /var/log/nginx/error.log warn;
+pid        /var/run/nginx.pid;
+
+events {
+  worker_connections  1024;
+}
+
+http {
+  include       /etc/nginx/mime.types;
+  default_type  application/octet-stream;
+
+  log_format  main  '$remote_addr - $remote_user [$time_local] "$request" '
+                    '$status $body_bytes_sent "$http_referer" '
+                    '"$http_user_agent" "$http_x_forwarded_for"';
+
+  access_log  /var/log/nginx/access.log  main;
+
+  sendfile        on;
+  keepalive_timeout  65;
+
+  # For WebSocket upgrade (noVNC)
+  map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+  }
+
+  upstream api_upstream {
+    server api:4001;
+    keepalive 16;
+  }
+
+  upstream novnc_upstream {
+    server chromium:3000;
+    keepalive 16;
+  }
+
+  upstream watcher_upstream {
+    server chromium:3101;
+    keepalive 16;
+  }
+
+  # ACME challenge endpoint on :80
+  server {
+    listen 80;
+    server_name ${DOMAIN};
+
+    location ^~ /.well-known/acme-challenge/ {
+      root /var/www/certbot;
+      try_files $uri =404;
+    }
+
+    # Redirect all other HTTP traffic to HTTPS (API port by default)
+    location / {
+      return 301 https://$host:${API_PORT}$request_uri;
+    }
+  }
+
+  # HTTPS for API on :${API_PORT}
+  server {
+    listen ${API_PORT} ssl http2;
+    server_name ${DOMAIN};
+
+    ssl_certificate           ${CERT_FULLCHAIN};
+    ssl_certificate_key       ${CERT_PRIVKEY};
+    ssl_session_cache         shared:SSL:10m;
+    ssl_session_timeout       10m;
+    ssl_protocols             TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers on;
+
+    # Security headers
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Frame-Options SAMEORIGIN;
+    add_header X-Content-Type-Options nosniff;
+
+    location / {
+      proxy_pass http://api_upstream;
+      proxy_http_version 1.1;
+      proxy_set_header Host $host;
+      proxy_set_header X-Real-IP $remote_addr;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header X-Forwarded-Proto $scheme;
+      proxy_set_header X-Forwarded-Host $host;
+      proxy_set_header X-Forwarded-Port $server_port;
+    }
+  }
+
+  # HTTPS for noVNC on :${NOVNC_PORT} (WebSocket aware)
+  server {
+    listen ${NOVNC_PORT} ssl http2;
+    server_name ${DOMAIN};
+
+    ssl_certificate           ${CERT_FULLCHAIN};
+    ssl_certificate_key       ${CERT_PRIVKEY};
+    ssl_session_cache         shared:SSL:10m;
+    ssl_session_timeout       10m;
+    ssl_protocols             TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers on;
+
+    # Security headers
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Frame-Options SAMEORIGIN;
+    add_header X-Content-Type-Options nosniff;
+
+    location / {
+      proxy_pass http://novnc_upstream;
+      proxy_http_version 1.1;
+      proxy_set_header Host $host;
+      proxy_set_header X-Real-IP $remote_addr;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header X-Forwarded-Proto $scheme;
+      proxy_set_header Upgrade $http_upgrade;
+      proxy_set_header Connection $connection_upgrade;
+      proxy_read_timeout 3600s;
+    }
+  }
+
+  # HTTPS for watcher UI/API on :${WATCHER_PORT}
+  server {
+    listen ${WATCHER_PORT} ssl http2;
+    server_name ${DOMAIN};
+
+    ssl_certificate           ${CERT_FULLCHAIN};
+    ssl_certificate_key       ${CERT_PRIVKEY};
+    ssl_session_cache         shared:SSL:10m;
+    ssl_session_timeout       10m;
+    ssl_protocols             TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers on;
+
+    # Security headers
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Frame-Options SAMEORIGIN;
+    add_header X-Content-Type-Options nosniff;
+
+    location / {
+      proxy_pass http://watcher_upstream;
+      proxy_http_version 1.1;
+      proxy_set_header Host $host;
+      proxy_set_header X-Real-IP $remote_addr;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header X-Forwarded-Proto $scheme;
+      proxy_read_timeout 3600s;
+    }
+  }
+}

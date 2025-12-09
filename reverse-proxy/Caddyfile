@@ -1,0 +1,168 @@
+{
+	# Email used for ACME/Let's Encrypt account
+	email {$ACME_EMAIL}
+	
+	# Global options for handling large requests
+	servers {
+		max_header_size 10MB
+	}
+}
+
+# Redirect plain HTTP on :80 to HTTPS API port
+http://{$DOMAIN} {
+	redir https://{$DOMAIN}:4001{uri} 301
+}
+
+# API over HTTPS on :4001
+{$DOMAIN}:4001 {
+	encode gzip
+	
+	# Increase request body size limit for bulk operations
+	request_body {
+		max_size 100MB
+	}
+	
+	reverse_proxy api:4001
+}
+
+# noVNC over HTTPS on :3000 - all workers via path routing
+{$DOMAIN}:3000 {
+	encode gzip
+	
+	# Worker Monitor
+	handle /monitor/* {
+		uri strip_prefix /monitor
+		reverse_proxy worker-monitor:8080
+	}
+	
+	# Worker 1 (default)
+	handle /worker-1/* {
+		uri strip_prefix /worker-1
+		reverse_proxy browser-worker:3001
+	}
+	
+	# Worker 2
+	handle /worker-2/* {
+		uri strip_prefix /worker-2
+		reverse_proxy browser-worker-2:3001
+	}
+	
+	# Worker 3
+	handle /worker-3/* {
+		uri strip_prefix /worker-3
+		reverse_proxy browser-worker-3:3001
+	}
+	
+	# Worker 4
+	handle /worker-4/* {
+		uri strip_prefix /worker-4
+		reverse_proxy browser-worker-4:3001
+	}
+	
+	# Worker 5
+	handle /worker-5/* {
+		uri strip_prefix /worker-5
+		reverse_proxy browser-worker-5:3001
+	}
+	
+	# Worker 6
+	handle /worker-6/* {
+		uri strip_prefix /worker-6
+		reverse_proxy browser-worker-6:3001
+	}
+	
+	# Worker 7
+	handle /worker-7/* {
+		uri strip_prefix /worker-7
+		reverse_proxy browser-worker-7:3001
+	}
+	
+	# Worker 8
+	handle /worker-8/* {
+		uri strip_prefix /worker-8
+		reverse_proxy browser-worker-8:3001
+	}
+	
+	# Worker 9
+	handle /worker-9/* {
+		uri strip_prefix /worker-9
+		reverse_proxy browser-worker-9:3001
+	}
+	
+	# Worker 10
+	handle /worker-10/* {
+		uri strip_prefix /worker-10
+		reverse_proxy browser-worker-10:3001
+	}
+	
+	# Worker 11
+	handle /worker-11/* {
+		uri strip_prefix /worker-11
+		reverse_proxy browser-worker-11:3001
+	}
+	
+	# Worker 12
+	handle /worker-12/* {
+		uri strip_prefix /worker-12
+		reverse_proxy browser-worker-12:3001
+	}
+	
+	# Worker 13
+	handle /worker-13/* {
+		uri strip_prefix /worker-13
+		reverse_proxy browser-worker-13:3001
+	}
+	
+	# Worker 14
+	handle /worker-14/* {
+		uri strip_prefix /worker-14
+		reverse_proxy browser-worker-14:3001
+	}
+	
+	# Worker 15
+	handle /worker-15/* {
+		uri strip_prefix /worker-15
+		reverse_proxy browser-worker-15:3001
+	}
+	
+	# Worker 16
+	handle /worker-16/* {
+		uri strip_prefix /worker-16
+		reverse_proxy browser-worker-16:3001
+	}
+	
+	# Worker 17
+	handle /worker-17/* {
+		uri strip_prefix /worker-17
+		reverse_proxy browser-worker-17:3001
+	}
+	
+	# Worker 18
+	handle /worker-18/* {
+		uri strip_prefix /worker-18
+		reverse_proxy browser-worker-18:3001
+	}
+	
+	# Worker 19
+	handle /worker-19/* {
+		uri strip_prefix /worker-19
+		reverse_proxy browser-worker-19:3001
+	}
+	
+	# Worker 20
+	handle /worker-20/* {
+		uri strip_prefix /worker-20
+		reverse_proxy browser-worker-20:3001
+	}
+	
+	# Default to worker 1 for root path
+	handle {
+		reverse_proxy browser-worker:3001
+	}
+}
+
+# Watcher over HTTPS on :3101
+{$DOMAIN}:3101 {
+	encode gzip
+	reverse_proxy chromium:3101
+}

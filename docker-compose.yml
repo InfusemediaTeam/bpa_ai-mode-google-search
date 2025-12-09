@@ -1,0 +1,1259 @@
+services:
+
+  redis:
+    image: redis:7-alpine
+    container_name: google-search-ai-redis
+    ports:
+      - "63793:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - redis_data:/data
+    command: ["redis-server", "--appendonly", "yes"]
+    networks:
+      - app_net
+
+  proxy-coordinator:
+    build:
+      context: ./tools/proxy-coordinator
+      dockerfile: Dockerfile
+    container_name: google-search-ai-proxy-coordinator
+    environment:
+      - COORDINATOR_PORT=4200
+      - REDIS_URL=redis://redis:6379
+      - PROXY_ROTATION_REQUESTS=${PROXY_ROTATION_REQUESTS:-0}
+      - PROXY_BLOCK_TIMEOUT_SEC=${PROXY_BLOCK_TIMEOUT_SEC:-300}
+      - PROXY_LIST=${PROXY_LIST:-}
+      - WORKER_BASE_URLS=${WORKER_BASE_URLS:-}
+    depends_on:
+      redis:
+        condition: service_healthy
+    expose:
+      - "4200"
+    networks:
+      - app_net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4200/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  reverse-proxy:
+    image: caddy:2
+    container_name: google-search-ai-caddy
+    profiles: ["proxy"]
+    depends_on:
+      api:
+        condition: service_started
+      browser-worker:
+        condition: service_started
+    ports:
+      - "80:80"                               # HTTP for ACME and redirect
+      - "${API_PORT:-4001}:4001"              # API over HTTPS
+      - "3000:3000"                           # noVNC over HTTPS
+    volumes:
+      - ./reverse-proxy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    environment:
+      - DOMAIN=${DOMAIN:-eg.instagingserver.com}
+      - ACME_EMAIL=${ACME_EMAIL:-youq@gmail.com}
+    networks:
+      - app_net
+    restart: unless-stopped
+
+  
+
+  certbot:
+    image: certbot/certbot:latest
+    container_name: google-search-ai-certbot
+    profiles: ["proxy"]
+    volumes:
+      - ./reverse-proxy/webroot:/var/www/certbot
+      - ./reverse-proxy/letsencrypt:/etc/letsencrypt
+    entrypoint: ["/bin/sh","-c"]
+    command: "echo 'Run: docker compose run --rm certbot certonly --webroot -w /var/www/certbot -d eg.instagingserver.com -m you@example.com --agree-tos --non-interactive'"
+    networks:
+      - app_net
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    container_name: google-search-ai-api
+    profiles: ["proxy"]
+    environment:
+      - PORT=4001
+      - NODE_ENV=production
+      - LOG_DIR=/usr/src/app/logs
+      - REDIS_URL=redis://redis:6379
+      - WORKER_BASE_URLS=${WORKER_BASE_URLS:-http://browser-worker:4101,http://browser-worker-2:4101,http://browser-worker-3:4101,http://browser-worker-4:4101,http://browser-worker-5:4101,http://browser-worker-6:4101,http://browser-worker-7:4101,http://browser-worker-8:4101,http://browser-worker-9:4101,http://browser-worker-10:4101,http://browser-worker-11:4101,http://browser-worker-12:4101,http://browser-worker-13:4101,http://browser-worker-14:4101,http://browser-worker-15:4101,http://browser-worker-16:4101,http://browser-worker-17:4101,http://browser-worker-18:4101,http://browser-worker-19:4101,http://browser-worker-20:4101}
+      # Centralized timeout controls (API -> worker and Bull)
+      - WORKER_HEALTH_TIMEOUT_MS=${WORKER_HEALTH_TIMEOUT_MS:-7000}
+      - WORKER_SEARCH_TIMEOUT_MS=${WORKER_SEARCH_TIMEOUT_MS:-30000}
+      - WORKER_REFRESH_TIMEOUT_MS=${WORKER_REFRESH_TIMEOUT_MS:-15000}
+      - WORKER_RESTART_TIMEOUT_MS=${WORKER_RESTART_TIMEOUT_MS:-15000}
+      - WORKER_WARMUP_TIMEOUT_MS=${WORKER_WARMUP_TIMEOUT_MS:-20000}
+      - BULL_SEARCH_TIMEOUT_MS=${BULL_SEARCH_TIMEOUT_MS:-60000}
+      - BULL_BULK_TIMEOUT_MS=${BULL_BULK_TIMEOUT_MS:-3600000}
+    volumes:
+      - ./logs:/usr/src/app/logs
+      - ./storage:/usr/src/app/storage
+    # expose internally only; external access goes via reverse-proxy
+    depends_on:
+      redis:
+        condition: service_started
+      browser-worker:
+        condition: service_started
+    networks:
+      - app_net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "--header", "X-Request-Id: healthcheck", "-f", "http://localhost:4001/search-intelligence/searcher/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  browser-worker:
+    build:
+      context: ./tools/browser-worker
+      dockerfile: Dockerfile
+    container_name: google-search-ai-browser-worker
+    environment:
+      - WORKER_PORT=4101
+      - WORKER_TIMEOUT_MS=10000
+      - CHROME_BINARY=/usr/bin/chromium
+      - CHROMEDRIVER=/usr/bin/chromedriver
+      - SESSION_PER_SEARCH=0
+      - USE_UC=0
+      - PY_WORKER_PROFILES=/data/.ai_mode_chrome_c,/data/.ai_mode_chrome_d
+      # Proxy configuration
+      - PROXY_LIST=${PROXY_LIST:-}
+      - PROXY_URL=${PROXY_URL:-}
+      - PROXY_BINDING_MODE=${PROXY_BINDING_MODE:-independent}
+      - REDIS_URL=redis://redis:6379
+      - COORDINATOR_URL=${COORDINATOR_URL:-http://proxy-coordinator:4200}
+      # Centralized Python worker timeouts (seconds)
+      - PY_PAGE_TIMEOUT_SEC=${PY_PAGE_TIMEOUT_SEC:-45}
+      - PY_ANSWER_TIMEOUT_SEC=${PY_ANSWER_TIMEOUT_SEC:-20}
+      - PY_AI_READY_TIMEOUT_SEC=${PY_AI_READY_TIMEOUT_SEC:-25}
+      - PY_AI_READY_TIMEOUT_PER_SEARCH_SEC=${PY_AI_READY_TIMEOUT_PER_SEARCH_SEC:-8}
+      - PY_SEARCH_PAGE_OPEN_TIMEOUT_SEC=${PY_SEARCH_PAGE_OPEN_TIMEOUT_SEC:-12}
+      - PY_NEW_SEARCH_BUTTON_WAIT_SEC=${PY_NEW_SEARCH_BUTTON_WAIT_SEC:-3}
+      - PY_QUIT_TIMEOUT_SEC=${PY_QUIT_TIMEOUT_SEC:-5}
+      # Periodic profile cleanup (runs inside container)
+      - CLEANUP_ENABLED=1
+      - CLEANUP_INTERVAL_MINUTES=120
+      - CLEANUP_MIN_AGE_MINUTES=60
+      - CLEANUP_INCLUDE_ACTIVE_CACHES=0
+    volumes:
+      - python_worker_data:/data
+    expose:
+      - "4101"
+      - "4102"
+    networks:
+      - app_net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "/app/healthcheck.py"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+
+  browser-worker-2:
+    profiles: ["worker2", "worker3", "worker4", "worker5"]
+    build:
+      context: ./tools/browser-worker
+      dockerfile: Dockerfile
+    container_name: google-search-ai-browser-worker-2
+    environment:
+      - WORKER_PORT=4101
+      - WORKER_TIMEOUT_MS=10000
+      - CHROME_BINARY=/usr/bin/chromium
+      - CHROMEDRIVER=/usr/bin/chromedriver
+      - SESSION_PER_SEARCH=0
+      - USE_UC=0
+      - PY_WORKER_PROFILES=/data/.ai_mode_chrome_2a,/data/.ai_mode_chrome_2b
+      # Proxy configuration
+      - PROXY_LIST=${PROXY_LIST:-}
+      - PROXY_URL=${PROXY_URL:-}
+      - PROXY_BINDING_MODE=${PROXY_BINDING_MODE:-independent}
+      - REDIS_URL=redis://redis:6379
+      - COORDINATOR_URL=${COORDINATOR_URL:-http://proxy-coordinator:4200}
+      - PY_PAGE_TIMEOUT_SEC=${PY_PAGE_TIMEOUT_SEC:-45}
+      - PY_ANSWER_TIMEOUT_SEC=${PY_ANSWER_TIMEOUT_SEC:-20}
+      - PY_AI_READY_TIMEOUT_SEC=${PY_AI_READY_TIMEOUT_SEC:-25}
+      - PY_AI_READY_TIMEOUT_PER_SEARCH_SEC=${PY_AI_READY_TIMEOUT_PER_SEARCH_SEC:-8}
+      - PY_SEARCH_PAGE_OPEN_TIMEOUT_SEC=${PY_SEARCH_PAGE_OPEN_TIMEOUT_SEC:-12}
+      - PY_NEW_SEARCH_BUTTON_WAIT_SEC=${PY_NEW_SEARCH_BUTTON_WAIT_SEC:-3}
+      - PY_QUIT_TIMEOUT_SEC=${PY_QUIT_TIMEOUT_SEC:-5}
+      - CLEANUP_ENABLED=1
+      - CLEANUP_INTERVAL_MINUTES=120
+      - CLEANUP_MIN_AGE_MINUTES=60
+      - CLEANUP_INCLUDE_ACTIVE_CACHES=0
+      - MAX_CHROME_MEMORY_MB=1500
+      - MIN_CHROME_PROCESSES=2
+    volumes:
+      - python_worker_data_2:/data
+    expose:
+      - "4101"
+      - "4102"
+      - "3001"
+    networks:
+      - app_net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "/app/healthcheck.py"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+
+  browser-worker-3:
+    profiles: ["worker3", "worker4", "worker5"]
+    build:
+      context: ./tools/browser-worker
+      dockerfile: Dockerfile
+    container_name: google-search-ai-browser-worker-3
+    environment:
+      - WORKER_PORT=4101
+      - WORKER_TIMEOUT_MS=10000
+      - CHROME_BINARY=/usr/bin/chromium
+      - CHROMEDRIVER=/usr/bin/chromedriver
+      - SESSION_PER_SEARCH=0
+      - USE_UC=0
+      - PY_WORKER_PROFILES=/data/.ai_mode_chrome_3a,/data/.ai_mode_chrome_3b
+      # Proxy configuration
+      - PROXY_LIST=${PROXY_LIST:-}
+      - PROXY_URL=${PROXY_URL:-}
+      - PROXY_BINDING_MODE=${PROXY_BINDING_MODE:-independent}
+      - REDIS_URL=redis://redis:6379
+      - COORDINATOR_URL=${COORDINATOR_URL:-http://proxy-coordinator:4200}
+      - PY_PAGE_TIMEOUT_SEC=${PY_PAGE_TIMEOUT_SEC:-45}
+      - PY_ANSWER_TIMEOUT_SEC=${PY_ANSWER_TIMEOUT_SEC:-20}
+      - PY_AI_READY_TIMEOUT_SEC=${PY_AI_READY_TIMEOUT_SEC:-25}
+      - PY_AI_READY_TIMEOUT_PER_SEARCH_SEC=${PY_AI_READY_TIMEOUT_PER_SEARCH_SEC:-8}
+      - PY_SEARCH_PAGE_OPEN_TIMEOUT_SEC=${PY_SEARCH_PAGE_OPEN_TIMEOUT_SEC:-12}
+      - PY_NEW_SEARCH_BUTTON_WAIT_SEC=${PY_NEW_SEARCH_BUTTON_WAIT_SEC:-3}
+      - PY_QUIT_TIMEOUT_SEC=${PY_QUIT_TIMEOUT_SEC:-5}
+      - CLEANUP_ENABLED=1
+      - CLEANUP_INTERVAL_MINUTES=120
+      - CLEANUP_MIN_AGE_MINUTES=60
+      - CLEANUP_INCLUDE_ACTIVE_CACHES=0
+      - MAX_CHROME_MEMORY_MB=1500
+      - MIN_CHROME_PROCESSES=2
+    volumes:
+      - python_worker_data_3:/data
+    expose:
+      - "4101"
+      - "4102"
+      - "3001"
+    networks:
+      - app_net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "/app/healthcheck.py"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+
+  browser-worker-4:
+    profiles: ["worker4", "worker5"]
+    build:
+      context: ./tools/browser-worker
+      dockerfile: Dockerfile
+    container_name: google-search-ai-browser-worker-4
+    environment:
+      - WORKER_PORT=4101
+      - WORKER_TIMEOUT_MS=10000
+      - CHROME_BINARY=/usr/bin/chromium
+      - CHROMEDRIVER=/usr/bin/chromedriver
+      - SESSION_PER_SEARCH=0
+      - USE_UC=0
+      - PY_WORKER_PROFILES=/data/.ai_mode_chrome_4a,/data/.ai_mode_chrome_4b
+      # Proxy configuration
+      - PROXY_LIST=${PROXY_LIST:-}
+      - PROXY_URL=${PROXY_URL:-}
+      - PROXY_BINDING_MODE=${PROXY_BINDING_MODE:-independent}
+      - REDIS_URL=redis://redis:6379
+      - COORDINATOR_URL=${COORDINATOR_URL:-http://proxy-coordinator:4200}
+      - PY_PAGE_TIMEOUT_SEC=${PY_PAGE_TIMEOUT_SEC:-45}
+      - PY_ANSWER_TIMEOUT_SEC=${PY_ANSWER_TIMEOUT_SEC:-20}
+      - PY_AI_READY_TIMEOUT_SEC=${PY_AI_READY_TIMEOUT_SEC:-25}
+      - PY_AI_READY_TIMEOUT_PER_SEARCH_SEC=${PY_AI_READY_TIMEOUT_PER_SEARCH_SEC:-8}
+      - PY_SEARCH_PAGE_OPEN_TIMEOUT_SEC=${PY_SEARCH_PAGE_OPEN_TIMEOUT_SEC:-12}
+      - PY_NEW_SEARCH_BUTTON_WAIT_SEC=${PY_NEW_SEARCH_BUTTON_WAIT_SEC:-3}
+      - PY_QUIT_TIMEOUT_SEC=${PY_QUIT_TIMEOUT_SEC:-5}
+      - CLEANUP_ENABLED=1
+      - CLEANUP_INTERVAL_MINUTES=120
+      - CLEANUP_MIN_AGE_MINUTES=60
+      - CLEANUP_INCLUDE_ACTIVE_CACHES=0
+      - MAX_CHROME_MEMORY_MB=1500
+      - MIN_CHROME_PROCESSES=2
+    volumes:
+      - python_worker_data_4:/data
+    expose:
+      - "4101"
+      - "4102"
+      - "3001"
+    networks:
+      - app_net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "/app/healthcheck.py"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+
+  browser-worker-5:
+    profiles: ["worker5"]
+    build:
+      context: ./tools/browser-worker
+      dockerfile: Dockerfile
+    container_name: google-search-ai-browser-worker-5
+    environment:
+      - WORKER_PORT=4101
+      - WORKER_TIMEOUT_MS=10000
+      - CHROME_BINARY=/usr/bin/chromium
+      - CHROMEDRIVER=/usr/bin/chromedriver
+      - SESSION_PER_SEARCH=0
+      - USE_UC=0
+      - PY_WORKER_PROFILES=/data/.ai_mode_chrome_5a,/data/.ai_mode_chrome_5b
+      # Proxy configuration
+      - PROXY_LIST=${PROXY_LIST:-}
+      - PROXY_URL=${PROXY_URL:-}
+      - PROXY_BINDING_MODE=${PROXY_BINDING_MODE:-independent}
+      - REDIS_URL=redis://redis:6379
+      - COORDINATOR_URL=${COORDINATOR_URL:-http://proxy-coordinator:4200}
+      - PY_PAGE_TIMEOUT_SEC=${PY_PAGE_TIMEOUT_SEC:-45}
+      - PY_ANSWER_TIMEOUT_SEC=${PY_ANSWER_TIMEOUT_SEC:-20}
+      - PY_AI_READY_TIMEOUT_SEC=${PY_AI_READY_TIMEOUT_SEC:-25}
+      - PY_AI_READY_TIMEOUT_PER_SEARCH_SEC=${PY_AI_READY_TIMEOUT_PER_SEARCH_SEC:-8}
+      - PY_SEARCH_PAGE_OPEN_TIMEOUT_SEC=${PY_SEARCH_PAGE_OPEN_TIMEOUT_SEC:-12}
+      - PY_NEW_SEARCH_BUTTON_WAIT_SEC=${PY_NEW_SEARCH_BUTTON_WAIT_SEC:-3}
+      - PY_QUIT_TIMEOUT_SEC=${PY_QUIT_TIMEOUT_SEC:-5}
+      - CLEANUP_ENABLED=1
+      - CLEANUP_INTERVAL_MINUTES=120
+      - CLEANUP_MIN_AGE_MINUTES=60
+      - CLEANUP_INCLUDE_ACTIVE_CACHES=0
+      - MAX_CHROME_MEMORY_MB=1500
+      - MIN_CHROME_PROCESSES=2
+    volumes:
+      - python_worker_data_5:/data
+    expose:
+      - "4101"
+      - "4102"
+      - "3001"
+    networks:
+      - app_net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "/app/healthcheck.py"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+
+  browser-worker-6:
+    profiles: ["worker6", "worker7", "worker8", "worker9", "worker10"]
+    build:
+      context: ./tools/browser-worker
+      dockerfile: Dockerfile
+    container_name: google-search-ai-browser-worker-6
+    environment:
+      - WORKER_PORT=4101
+      - WORKER_TIMEOUT_MS=10000
+      - CHROME_BINARY=/usr/bin/chromium
+      - CHROMEDRIVER=/usr/bin/chromedriver
+      - SESSION_PER_SEARCH=0
+      - USE_UC=0
+      - PY_WORKER_PROFILES=/data/.ai_mode_chrome_6a,/data/.ai_mode_chrome_6b
+      # Proxy configuration
+      - PROXY_LIST=${PROXY_LIST:-}
+      - PROXY_URL=${PROXY_URL:-}
+      - PROXY_BINDING_MODE=${PROXY_BINDING_MODE:-independent}
+      - REDIS_URL=redis://redis:6379
+      - COORDINATOR_URL=${COORDINATOR_URL:-http://proxy-coordinator:4200}
+      - PY_PAGE_TIMEOUT_SEC=${PY_PAGE_TIMEOUT_SEC:-45}
+      - PY_ANSWER_TIMEOUT_SEC=${PY_ANSWER_TIMEOUT_SEC:-20}
+      - PY_AI_READY_TIMEOUT_SEC=${PY_AI_READY_TIMEOUT_SEC:-25}
+      - PY_AI_READY_TIMEOUT_PER_SEARCH_SEC=${PY_AI_READY_TIMEOUT_PER_SEARCH_SEC:-8}
+      - PY_SEARCH_PAGE_OPEN_TIMEOUT_SEC=${PY_SEARCH_PAGE_OPEN_TIMEOUT_SEC:-12}
+      - PY_NEW_SEARCH_BUTTON_WAIT_SEC=${PY_NEW_SEARCH_BUTTON_WAIT_SEC:-3}
+      - PY_QUIT_TIMEOUT_SEC=${PY_QUIT_TIMEOUT_SEC:-5}
+      - CLEANUP_ENABLED=1
+      - CLEANUP_INTERVAL_MINUTES=120
+      - CLEANUP_MIN_AGE_MINUTES=60
+      - CLEANUP_INCLUDE_ACTIVE_CACHES=0
+      - MAX_CHROME_MEMORY_MB=1500
+      - MIN_CHROME_PROCESSES=2
+    volumes:
+      - python_worker_data_6:/data
+    expose:
+      - "4101"
+      - "4102"
+      - "3001"
+    networks:
+      - app_net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "/app/healthcheck.py"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+
+  browser-worker-7:
+    profiles: ["worker7", "worker8", "worker9", "worker10"]
+    build:
+      context: ./tools/browser-worker
+      dockerfile: Dockerfile
+    container_name: google-search-ai-browser-worker-7
+    environment:
+      - WORKER_PORT=4101
+      - WORKER_TIMEOUT_MS=10000
+      - CHROME_BINARY=/usr/bin/chromium
+      - CHROMEDRIVER=/usr/bin/chromedriver
+      - SESSION_PER_SEARCH=0
+      - USE_UC=0
+      - PY_WORKER_PROFILES=/data/.ai_mode_chrome_7a,/data/.ai_mode_chrome_7b
+      # Proxy configuration
+      - PROXY_LIST=${PROXY_LIST:-}
+      - PROXY_URL=${PROXY_URL:-}
+      - PROXY_BINDING_MODE=${PROXY_BINDING_MODE:-independent}
+      - REDIS_URL=redis://redis:6379
+      - COORDINATOR_URL=${COORDINATOR_URL:-http://proxy-coordinator:4200}
+      - PY_PAGE_TIMEOUT_SEC=${PY_PAGE_TIMEOUT_SEC:-45}
+      - PY_ANSWER_TIMEOUT_SEC=${PY_ANSWER_TIMEOUT_SEC:-20}
+      - PY_AI_READY_TIMEOUT_SEC=${PY_AI_READY_TIMEOUT_SEC:-25}
+      - PY_AI_READY_TIMEOUT_PER_SEARCH_SEC=${PY_AI_READY_TIMEOUT_PER_SEARCH_SEC:-8}
+      - PY_SEARCH_PAGE_OPEN_TIMEOUT_SEC=${PY_SEARCH_PAGE_OPEN_TIMEOUT_SEC:-12}
+      - PY_NEW_SEARCH_BUTTON_WAIT_SEC=${PY_NEW_SEARCH_BUTTON_WAIT_SEC:-3}
+      - PY_QUIT_TIMEOUT_SEC=${PY_QUIT_TIMEOUT_SEC:-5}
+      - CLEANUP_ENABLED=1
+      - CLEANUP_INTERVAL_MINUTES=120
+      - CLEANUP_MIN_AGE_MINUTES=60
+      - CLEANUP_INCLUDE_ACTIVE_CACHES=0
+      - MAX_CHROME_MEMORY_MB=1500
+      - MIN_CHROME_PROCESSES=2
+    volumes:
+      - python_worker_data_7:/data
+    expose:
+      - "4101"
+      - "4102"
+      - "3001"
+    networks:
+      - app_net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "/app/healthcheck.py"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+
+  browser-worker-8:
+    profiles: ["worker8", "worker9", "worker10"]
+    build:
+      context: ./tools/browser-worker
+      dockerfile: Dockerfile
+    container_name: google-search-ai-browser-worker-8
+    environment:
+      - WORKER_PORT=4101
+      - WORKER_TIMEOUT_MS=10000
+      - CHROME_BINARY=/usr/bin/chromium
+      - CHROMEDRIVER=/usr/bin/chromedriver
+      - SESSION_PER_SEARCH=0
+      - USE_UC=0
+      - PY_WORKER_PROFILES=/data/.ai_mode_chrome_8a,/data/.ai_mode_chrome_8b
+      # Proxy configuration
+      - PROXY_LIST=${PROXY_LIST:-}
+      - PROXY_URL=${PROXY_URL:-}
+      - PROXY_BINDING_MODE=${PROXY_BINDING_MODE:-independent}
+      - REDIS_URL=redis://redis:6379
+      - COORDINATOR_URL=${COORDINATOR_URL:-http://proxy-coordinator:4200}
+      - PY_PAGE_TIMEOUT_SEC=${PY_PAGE_TIMEOUT_SEC:-45}
+      - PY_ANSWER_TIMEOUT_SEC=${PY_ANSWER_TIMEOUT_SEC:-20}
+      - PY_AI_READY_TIMEOUT_SEC=${PY_AI_READY_TIMEOUT_SEC:-25}
+      - PY_AI_READY_TIMEOUT_PER_SEARCH_SEC=${PY_AI_READY_TIMEOUT_PER_SEARCH_SEC:-8}
+      - PY_SEARCH_PAGE_OPEN_TIMEOUT_SEC=${PY_SEARCH_PAGE_OPEN_TIMEOUT_SEC:-12}
+      - PY_NEW_SEARCH_BUTTON_WAIT_SEC=${PY_NEW_SEARCH_BUTTON_WAIT_SEC:-3}
+      - PY_QUIT_TIMEOUT_SEC=${PY_QUIT_TIMEOUT_SEC:-5}
+      - CLEANUP_ENABLED=1
+      - CLEANUP_INTERVAL_MINUTES=120
+      - CLEANUP_MIN_AGE_MINUTES=60
+      - CLEANUP_INCLUDE_ACTIVE_CACHES=0
+      - MAX_CHROME_MEMORY_MB=1500
+      - MIN_CHROME_PROCESSES=2
+    volumes:
+      - python_worker_data_8:/data
+    expose:
+      - "4101"
+      - "4102"
+      - "3001"
+    networks:
+      - app_net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "/app/healthcheck.py"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+
+  browser-worker-9:
+    profiles: ["worker9", "worker10"]
+    build:
+      context: ./tools/browser-worker
+      dockerfile: Dockerfile
+    container_name: google-search-ai-browser-worker-9
+    environment:
+      - WORKER_PORT=4101
+      - WORKER_TIMEOUT_MS=10000
+      - CHROME_BINARY=/usr/bin/chromium
+      - CHROMEDRIVER=/usr/bin/chromedriver
+      - SESSION_PER_SEARCH=0
+      - USE_UC=0
+      - PY_WORKER_PROFILES=/data/.ai_mode_chrome_9a,/data/.ai_mode_chrome_9b
+      # Proxy configuration
+      - PROXY_LIST=${PROXY_LIST:-}
+      - PROXY_URL=${PROXY_URL:-}
+      - PROXY_BINDING_MODE=${PROXY_BINDING_MODE:-independent}
+      - REDIS_URL=redis://redis:6379
+      - COORDINATOR_URL=${COORDINATOR_URL:-http://proxy-coordinator:4200}
+      - PY_PAGE_TIMEOUT_SEC=${PY_PAGE_TIMEOUT_SEC:-45}
+      - PY_ANSWER_TIMEOUT_SEC=${PY_ANSWER_TIMEOUT_SEC:-20}
+      - PY_AI_READY_TIMEOUT_SEC=${PY_AI_READY_TIMEOUT_SEC:-25}
+      - PY_AI_READY_TIMEOUT_PER_SEARCH_SEC=${PY_AI_READY_TIMEOUT_PER_SEARCH_SEC:-8}
+      - PY_SEARCH_PAGE_OPEN_TIMEOUT_SEC=${PY_SEARCH_PAGE_OPEN_TIMEOUT_SEC:-12}
+      - PY_NEW_SEARCH_BUTTON_WAIT_SEC=${PY_NEW_SEARCH_BUTTON_WAIT_SEC:-3}
+      - PY_QUIT_TIMEOUT_SEC=${PY_QUIT_TIMEOUT_SEC:-5}
+      - CLEANUP_ENABLED=1
+      - CLEANUP_INTERVAL_MINUTES=120
+      - CLEANUP_MIN_AGE_MINUTES=60
+      - CLEANUP_INCLUDE_ACTIVE_CACHES=0
+      - MAX_CHROME_MEMORY_MB=1500
+      - MIN_CHROME_PROCESSES=2
+    volumes:
+      - python_worker_data_9:/data
+    expose:
+      - "4101"
+      - "4102"
+      - "3001"
+    networks:
+      - app_net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "/app/healthcheck.py"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+
+  browser-worker-10:
+    profiles: ["worker10"]
+    build:
+      context: ./tools/browser-worker
+      dockerfile: Dockerfile
+    container_name: google-search-ai-browser-worker-10
+    environment:
+      - WORKER_PORT=4101
+      - WORKER_TIMEOUT_MS=10000
+      - CHROME_BINARY=/usr/bin/chromium
+      - CHROMEDRIVER=/usr/bin/chromedriver
+      - SESSION_PER_SEARCH=0
+      - USE_UC=0
+      - PY_WORKER_PROFILES=/data/.ai_mode_chrome_10a,/data/.ai_mode_chrome_10b
+      # Proxy configuration
+      - PROXY_LIST=${PROXY_LIST:-}
+      - PROXY_URL=${PROXY_URL:-}
+      - PROXY_BINDING_MODE=${PROXY_BINDING_MODE:-independent}
+      - REDIS_URL=redis://redis:6379
+      - COORDINATOR_URL=${COORDINATOR_URL:-http://proxy-coordinator:4200}
+      - PY_PAGE_TIMEOUT_SEC=${PY_PAGE_TIMEOUT_SEC:-45}
+      - PY_ANSWER_TIMEOUT_SEC=${PY_ANSWER_TIMEOUT_SEC:-20}
+      - PY_AI_READY_TIMEOUT_SEC=${PY_AI_READY_TIMEOUT_SEC:-25}
+      - PY_AI_READY_TIMEOUT_PER_SEARCH_SEC=${PY_AI_READY_TIMEOUT_PER_SEARCH_SEC:-8}
+      - PY_SEARCH_PAGE_OPEN_TIMEOUT_SEC=${PY_SEARCH_PAGE_OPEN_TIMEOUT_SEC:-12}
+      - PY_NEW_SEARCH_BUTTON_WAIT_SEC=${PY_NEW_SEARCH_BUTTON_WAIT_SEC:-3}
+      - PY_QUIT_TIMEOUT_SEC=${PY_QUIT_TIMEOUT_SEC:-5}
+      - CLEANUP_ENABLED=1
+      - CLEANUP_INTERVAL_MINUTES=120
+      - CLEANUP_MIN_AGE_MINUTES=60
+      - CLEANUP_INCLUDE_ACTIVE_CACHES=0
+      - MAX_CHROME_MEMORY_MB=1500
+      - MIN_CHROME_PROCESSES=2
+    volumes:
+      - python_worker_data_10:/data
+    expose:
+      - "4101"
+      - "4102"
+      - "3001"
+    networks:
+      - app_net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "/app/healthcheck.py"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+
+  browser-worker-11:
+    profiles: ["worker11", "worker12", "worker13", "worker14", "worker15", "worker16", "worker17", "worker18", "worker19", "worker20"]
+    build:
+      context: ./tools/browser-worker
+      dockerfile: Dockerfile
+    container_name: google-search-ai-browser-worker-11
+    environment:
+      - WORKER_PORT=4101
+      - WORKER_TIMEOUT_MS=10000
+      - CHROME_BINARY=/usr/bin/chromium
+      - CHROMEDRIVER=/usr/bin/chromedriver
+      - SESSION_PER_SEARCH=0
+      - USE_UC=0
+      - PY_WORKER_PROFILES=/data/.ai_mode_chrome_11a,/data/.ai_mode_chrome_11b
+      # Proxy configuration
+      - PROXY_LIST=${PROXY_LIST:-}
+      - PROXY_URL=${PROXY_URL:-}
+      - PROXY_BINDING_MODE=${PROXY_BINDING_MODE:-independent}
+      - REDIS_URL=redis://redis:6379
+      - COORDINATOR_URL=${COORDINATOR_URL:-http://proxy-coordinator:4200}
+      - PY_PAGE_TIMEOUT_SEC=${PY_PAGE_TIMEOUT_SEC:-45}
+      - PY_ANSWER_TIMEOUT_SEC=${PY_ANSWER_TIMEOUT_SEC:-20}
+      - PY_AI_READY_TIMEOUT_SEC=${PY_AI_READY_TIMEOUT_SEC:-25}
+      - PY_AI_READY_TIMEOUT_PER_SEARCH_SEC=${PY_AI_READY_TIMEOUT_PER_SEARCH_SEC:-8}
+      - PY_SEARCH_PAGE_OPEN_TIMEOUT_SEC=${PY_SEARCH_PAGE_OPEN_TIMEOUT_SEC:-12}
+      - PY_NEW_SEARCH_BUTTON_WAIT_SEC=${PY_NEW_SEARCH_BUTTON_WAIT_SEC:-3}
+      - PY_QUIT_TIMEOUT_SEC=${PY_QUIT_TIMEOUT_SEC:-5}
+      - CLEANUP_ENABLED=1
+      - CLEANUP_INTERVAL_MINUTES=120
+      - CLEANUP_MIN_AGE_MINUTES=60
+      - CLEANUP_INCLUDE_ACTIVE_CACHES=0
+      - MAX_CHROME_MEMORY_MB=1500
+      - MIN_CHROME_PROCESSES=2
+    volumes:
+      - python_worker_data_11:/data
+    expose:
+      - "4101"
+      - "4102"
+      - "3001"
+    networks:
+      - app_net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "/app/healthcheck.py"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+
+  browser-worker-12:
+    profiles: ["worker12", "worker13", "worker14", "worker15", "worker16", "worker17", "worker18", "worker19", "worker20"]
+    build:
+      context: ./tools/browser-worker
+      dockerfile: Dockerfile
+    container_name: google-search-ai-browser-worker-12
+    environment:
+      - WORKER_PORT=4101
+      - WORKER_TIMEOUT_MS=10000
+      - CHROME_BINARY=/usr/bin/chromium
+      - CHROMEDRIVER=/usr/bin/chromedriver
+      - SESSION_PER_SEARCH=0
+      - USE_UC=0
+      - PY_WORKER_PROFILES=/data/.ai_mode_chrome_12a,/data/.ai_mode_chrome_12b
+      # Proxy configuration
+      - PROXY_LIST=${PROXY_LIST:-}
+      - PROXY_URL=${PROXY_URL:-}
+      - PROXY_BINDING_MODE=${PROXY_BINDING_MODE:-independent}
+      - REDIS_URL=redis://redis:6379
+      - COORDINATOR_URL=${COORDINATOR_URL:-http://proxy-coordinator:4200}
+      - PY_PAGE_TIMEOUT_SEC=${PY_PAGE_TIMEOUT_SEC:-45}
+      - PY_ANSWER_TIMEOUT_SEC=${PY_ANSWER_TIMEOUT_SEC:-20}
+      - PY_AI_READY_TIMEOUT_SEC=${PY_AI_READY_TIMEOUT_SEC:-25}
+      - PY_AI_READY_TIMEOUT_PER_SEARCH_SEC=${PY_AI_READY_TIMEOUT_PER_SEARCH_SEC:-8}
+      - PY_SEARCH_PAGE_OPEN_TIMEOUT_SEC=${PY_SEARCH_PAGE_OPEN_TIMEOUT_SEC:-12}
+      - PY_NEW_SEARCH_BUTTON_WAIT_SEC=${PY_NEW_SEARCH_BUTTON_WAIT_SEC:-3}
+      - PY_QUIT_TIMEOUT_SEC=${PY_QUIT_TIMEOUT_SEC:-5}
+      - CLEANUP_ENABLED=1
+      - CLEANUP_INTERVAL_MINUTES=120
+      - CLEANUP_MIN_AGE_MINUTES=60
+      - CLEANUP_INCLUDE_ACTIVE_CACHES=0
+      - MAX_CHROME_MEMORY_MB=1500
+      - MIN_CHROME_PROCESSES=2
+    volumes:
+      - python_worker_data_12:/data
+    expose:
+      - "4101"
+      - "4102"
+      - "3001"
+    networks:
+      - app_net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "/app/healthcheck.py"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+
+  browser-worker-13:
+    profiles: ["worker13", "worker14", "worker15", "worker16", "worker17", "worker18", "worker19", "worker20"]
+    build:
+      context: ./tools/browser-worker
+      dockerfile: Dockerfile
+    container_name: google-search-ai-browser-worker-13
+    environment:
+      - WORKER_PORT=4101
+      - WORKER_TIMEOUT_MS=10000
+      - CHROME_BINARY=/usr/bin/chromium
+      - CHROMEDRIVER=/usr/bin/chromedriver
+      - SESSION_PER_SEARCH=0
+      - USE_UC=0
+      - PY_WORKER_PROFILES=/data/.ai_mode_chrome_13a,/data/.ai_mode_chrome_13b
+      # Proxy configuration
+      - PROXY_LIST=${PROXY_LIST:-}
+      - PROXY_URL=${PROXY_URL:-}
+      - PROXY_BINDING_MODE=${PROXY_BINDING_MODE:-independent}
+      - REDIS_URL=redis://redis:6379
+      - COORDINATOR_URL=${COORDINATOR_URL:-http://proxy-coordinator:4200}
+      - PY_PAGE_TIMEOUT_SEC=${PY_PAGE_TIMEOUT_SEC:-45}
+      - PY_ANSWER_TIMEOUT_SEC=${PY_ANSWER_TIMEOUT_SEC:-20}
+      - PY_AI_READY_TIMEOUT_SEC=${PY_AI_READY_TIMEOUT_SEC:-25}
+      - PY_AI_READY_TIMEOUT_PER_SEARCH_SEC=${PY_AI_READY_TIMEOUT_PER_SEARCH_SEC:-8}
+      - PY_SEARCH_PAGE_OPEN_TIMEOUT_SEC=${PY_SEARCH_PAGE_OPEN_TIMEOUT_SEC:-12}
+      - PY_NEW_SEARCH_BUTTON_WAIT_SEC=${PY_NEW_SEARCH_BUTTON_WAIT_SEC:-3}
+      - PY_QUIT_TIMEOUT_SEC=${PY_QUIT_TIMEOUT_SEC:-5}
+      - CLEANUP_ENABLED=1
+      - CLEANUP_INTERVAL_MINUTES=120
+      - CLEANUP_MIN_AGE_MINUTES=60
+      - CLEANUP_INCLUDE_ACTIVE_CACHES=0
+      - MAX_CHROME_MEMORY_MB=1500
+      - MIN_CHROME_PROCESSES=2
+    volumes:
+      - python_worker_data_13:/data
+    expose:
+      - "4101"
+      - "4102"
+      - "3001"
+    networks:
+      - app_net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "/app/healthcheck.py"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+
+  browser-worker-14:
+    profiles: ["worker14", "worker15", "worker16", "worker17", "worker18", "worker19", "worker20"]
+    build:
+      context: ./tools/browser-worker
+      dockerfile: Dockerfile
+    container_name: google-search-ai-browser-worker-14
+    environment:
+      - WORKER_PORT=4101
+      - WORKER_TIMEOUT_MS=10000
+      - CHROME_BINARY=/usr/bin/chromium
+      - CHROMEDRIVER=/usr/bin/chromedriver
+      - SESSION_PER_SEARCH=0
+      - USE_UC=0
+      - PY_WORKER_PROFILES=/data/.ai_mode_chrome_14a,/data/.ai_mode_chrome_14b
+      # Proxy configuration
+      - PROXY_LIST=${PROXY_LIST:-}
+      - PROXY_URL=${PROXY_URL:-}
+      - PROXY_BINDING_MODE=${PROXY_BINDING_MODE:-independent}
+      - REDIS_URL=redis://redis:6379
+      - COORDINATOR_URL=${COORDINATOR_URL:-http://proxy-coordinator:4200}
+      - PY_PAGE_TIMEOUT_SEC=${PY_PAGE_TIMEOUT_SEC:-45}
+      - PY_ANSWER_TIMEOUT_SEC=${PY_ANSWER_TIMEOUT_SEC:-20}
+      - PY_AI_READY_TIMEOUT_SEC=${PY_AI_READY_TIMEOUT_SEC:-25}
+      - PY_AI_READY_TIMEOUT_PER_SEARCH_SEC=${PY_AI_READY_TIMEOUT_PER_SEARCH_SEC:-8}
+      - PY_SEARCH_PAGE_OPEN_TIMEOUT_SEC=${PY_SEARCH_PAGE_OPEN_TIMEOUT_SEC:-12}
+      - PY_NEW_SEARCH_BUTTON_WAIT_SEC=${PY_NEW_SEARCH_BUTTON_WAIT_SEC:-3}
+      - PY_QUIT_TIMEOUT_SEC=${PY_QUIT_TIMEOUT_SEC:-5}
+      - CLEANUP_ENABLED=1
+      - CLEANUP_INTERVAL_MINUTES=120
+      - CLEANUP_MIN_AGE_MINUTES=60
+      - CLEANUP_INCLUDE_ACTIVE_CACHES=0
+      - MAX_CHROME_MEMORY_MB=1500
+      - MIN_CHROME_PROCESSES=2
+    volumes:
+      - python_worker_data_14:/data
+    expose:
+      - "4101"
+      - "4102"
+      - "3001"
+    networks:
+      - app_net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "/app/healthcheck.py"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+
+  browser-worker-15:
+    profiles: ["worker15", "worker16", "worker17", "worker18", "worker19", "worker20"]
+    build:
+      context: ./tools/browser-worker
+      dockerfile: Dockerfile
+    container_name: google-search-ai-browser-worker-15
+    environment:
+      - WORKER_PORT=4101
+      - WORKER_TIMEOUT_MS=10000
+      - CHROME_BINARY=/usr/bin/chromium
+      - CHROMEDRIVER=/usr/bin/chromedriver
+      - SESSION_PER_SEARCH=0
+      - USE_UC=0
+      - PY_WORKER_PROFILES=/data/.ai_mode_chrome_15a,/data/.ai_mode_chrome_15b
+      # Proxy configuration
+      - PROXY_LIST=${PROXY_LIST:-}
+      - PROXY_URL=${PROXY_URL:-}
+      - PROXY_BINDING_MODE=${PROXY_BINDING_MODE:-independent}
+      - REDIS_URL=redis://redis:6379
+      - COORDINATOR_URL=${COORDINATOR_URL:-http://proxy-coordinator:4200}
+      - PY_PAGE_TIMEOUT_SEC=${PY_PAGE_TIMEOUT_SEC:-45}
+      - PY_ANSWER_TIMEOUT_SEC=${PY_ANSWER_TIMEOUT_SEC:-20}
+      - PY_AI_READY_TIMEOUT_SEC=${PY_AI_READY_TIMEOUT_SEC:-25}
+      - PY_AI_READY_TIMEOUT_PER_SEARCH_SEC=${PY_AI_READY_TIMEOUT_PER_SEARCH_SEC:-8}
+      - PY_SEARCH_PAGE_OPEN_TIMEOUT_SEC=${PY_SEARCH_PAGE_OPEN_TIMEOUT_SEC:-12}
+      - PY_NEW_SEARCH_BUTTON_WAIT_SEC=${PY_NEW_SEARCH_BUTTON_WAIT_SEC:-3}
+      - PY_QUIT_TIMEOUT_SEC=${PY_QUIT_TIMEOUT_SEC:-5}
+      - CLEANUP_ENABLED=1
+      - CLEANUP_INTERVAL_MINUTES=120
+      - CLEANUP_MIN_AGE_MINUTES=60
+      - CLEANUP_INCLUDE_ACTIVE_CACHES=0
+      - MAX_CHROME_MEMORY_MB=1500
+      - MIN_CHROME_PROCESSES=2
+    volumes:
+      - python_worker_data_15:/data
+    expose:
+      - "4101"
+      - "4102"
+      - "3001"
+    networks:
+      - app_net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "/app/healthcheck.py"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+
+  browser-worker-16:
+    profiles: ["worker16", "worker17", "worker18", "worker19", "worker20"]
+    build:
+      context: ./tools/browser-worker
+      dockerfile: Dockerfile
+    container_name: google-search-ai-browser-worker-16
+    environment:
+      - WORKER_PORT=4101
+      - WORKER_TIMEOUT_MS=10000
+      - CHROME_BINARY=/usr/bin/chromium
+      - CHROMEDRIVER=/usr/bin/chromedriver
+      - SESSION_PER_SEARCH=0
+      - USE_UC=0
+      - PY_WORKER_PROFILES=/data/.ai_mode_chrome_16a,/data/.ai_mode_chrome_16b
+      # Proxy configuration
+      - PROXY_LIST=${PROXY_LIST:-}
+      - PROXY_URL=${PROXY_URL:-}
+      - PROXY_BINDING_MODE=${PROXY_BINDING_MODE:-independent}
+      - REDIS_URL=redis://redis:6379
+      - COORDINATOR_URL=${COORDINATOR_URL:-http://proxy-coordinator:4200}
+      - PY_PAGE_TIMEOUT_SEC=${PY_PAGE_TIMEOUT_SEC:-45}
+      - PY_ANSWER_TIMEOUT_SEC=${PY_ANSWER_TIMEOUT_SEC:-20}
+      - PY_AI_READY_TIMEOUT_SEC=${PY_AI_READY_TIMEOUT_SEC:-25}
+      - PY_AI_READY_TIMEOUT_PER_SEARCH_SEC=${PY_AI_READY_TIMEOUT_PER_SEARCH_SEC:-8}
+      - PY_SEARCH_PAGE_OPEN_TIMEOUT_SEC=${PY_SEARCH_PAGE_OPEN_TIMEOUT_SEC:-12}
+      - PY_NEW_SEARCH_BUTTON_WAIT_SEC=${PY_NEW_SEARCH_BUTTON_WAIT_SEC:-3}
+      - PY_QUIT_TIMEOUT_SEC=${PY_QUIT_TIMEOUT_SEC:-5}
+      - CLEANUP_ENABLED=1
+      - CLEANUP_INTERVAL_MINUTES=120
+      - CLEANUP_MIN_AGE_MINUTES=60
+      - CLEANUP_INCLUDE_ACTIVE_CACHES=0
+      - MAX_CHROME_MEMORY_MB=1500
+      - MIN_CHROME_PROCESSES=2
+    volumes:
+      - python_worker_data_16:/data
+    expose:
+      - "4101"
+      - "4102"
+      - "3001"
+    networks:
+      - app_net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "/app/healthcheck.py"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+
+  browser-worker-17:
+    profiles: ["worker17", "worker18", "worker19", "worker20"]
+    build:
+      context: ./tools/browser-worker
+      dockerfile: Dockerfile
+    container_name: google-search-ai-browser-worker-17
+    environment:
+      - WORKER_PORT=4101
+      - WORKER_TIMEOUT_MS=10000
+      - CHROME_BINARY=/usr/bin/chromium
+      - CHROMEDRIVER=/usr/bin/chromedriver
+      - SESSION_PER_SEARCH=0
+      - USE_UC=0
+      - PY_WORKER_PROFILES=/data/.ai_mode_chrome_17a,/data/.ai_mode_chrome_17b
+      # Proxy configuration
+      - PROXY_LIST=${PROXY_LIST:-}
+      - PROXY_URL=${PROXY_URL:-}
+      - PROXY_BINDING_MODE=${PROXY_BINDING_MODE:-independent}
+      - REDIS_URL=redis://redis:6379
+      - COORDINATOR_URL=${COORDINATOR_URL:-http://proxy-coordinator:4200}
+      - PY_PAGE_TIMEOUT_SEC=${PY_PAGE_TIMEOUT_SEC:-45}
+      - PY_ANSWER_TIMEOUT_SEC=${PY_ANSWER_TIMEOUT_SEC:-20}
+      - PY_AI_READY_TIMEOUT_SEC=${PY_AI_READY_TIMEOUT_SEC:-25}
+      - PY_AI_READY_TIMEOUT_PER_SEARCH_SEC=${PY_AI_READY_TIMEOUT_PER_SEARCH_SEC:-8}
+      - PY_SEARCH_PAGE_OPEN_TIMEOUT_SEC=${PY_SEARCH_PAGE_OPEN_TIMEOUT_SEC:-12}
+      - PY_NEW_SEARCH_BUTTON_WAIT_SEC=${PY_NEW_SEARCH_BUTTON_WAIT_SEC:-3}
+      - PY_QUIT_TIMEOUT_SEC=${PY_QUIT_TIMEOUT_SEC:-5}
+      - CLEANUP_ENABLED=1
+      - CLEANUP_INTERVAL_MINUTES=120
+      - CLEANUP_MIN_AGE_MINUTES=60
+      - CLEANUP_INCLUDE_ACTIVE_CACHES=0
+      - MAX_CHROME_MEMORY_MB=1500
+      - MIN_CHROME_PROCESSES=2
+    volumes:
+      - python_worker_data_17:/data
+    expose:
+      - "4101"
+      - "4102"
+      - "3001"
+    networks:
+      - app_net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "/app/healthcheck.py"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+
+  browser-worker-18:
+    profiles: ["worker18", "worker19", "worker20"]
+    build:
+      context: ./tools/browser-worker
+      dockerfile: Dockerfile
+    container_name: google-search-ai-browser-worker-18
+    environment:
+      - WORKER_PORT=4101
+      - WORKER_TIMEOUT_MS=10000
+      - CHROME_BINARY=/usr/bin/chromium
+      - CHROMEDRIVER=/usr/bin/chromedriver
+      - SESSION_PER_SEARCH=0
+      - USE_UC=0
+      - PY_WORKER_PROFILES=/data/.ai_mode_chrome_18a,/data/.ai_mode_chrome_18b
+      # Proxy configuration
+      - PROXY_LIST=${PROXY_LIST:-}
+      - PROXY_URL=${PROXY_URL:-}
+      - PROXY_BINDING_MODE=${PROXY_BINDING_MODE:-independent}
+      - REDIS_URL=redis://redis:6379
+      - COORDINATOR_URL=${COORDINATOR_URL:-http://proxy-coordinator:4200}
+      - PY_PAGE_TIMEOUT_SEC=${PY_PAGE_TIMEOUT_SEC:-45}
+      - PY_ANSWER_TIMEOUT_SEC=${PY_ANSWER_TIMEOUT_SEC:-20}
+      - PY_AI_READY_TIMEOUT_SEC=${PY_AI_READY_TIMEOUT_SEC:-25}
+      - PY_AI_READY_TIMEOUT_PER_SEARCH_SEC=${PY_AI_READY_TIMEOUT_PER_SEARCH_SEC:-8}
+      - PY_SEARCH_PAGE_OPEN_TIMEOUT_SEC=${PY_SEARCH_PAGE_OPEN_TIMEOUT_SEC:-12}
+      - PY_NEW_SEARCH_BUTTON_WAIT_SEC=${PY_NEW_SEARCH_BUTTON_WAIT_SEC:-3}
+      - PY_QUIT_TIMEOUT_SEC=${PY_QUIT_TIMEOUT_SEC:-5}
+      - CLEANUP_ENABLED=1
+      - CLEANUP_INTERVAL_MINUTES=120
+      - CLEANUP_MIN_AGE_MINUTES=60
+      - CLEANUP_INCLUDE_ACTIVE_CACHES=0
+      - MAX_CHROME_MEMORY_MB=1500
+      - MIN_CHROME_PROCESSES=2
+    volumes:
+      - python_worker_data_18:/data
+    expose:
+      - "4101"
+      - "4102"
+      - "3001"
+    networks:
+      - app_net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "/app/healthcheck.py"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+
+  browser-worker-19:
+    profiles: ["worker19", "worker20"]
+    build:
+      context: ./tools/browser-worker
+      dockerfile: Dockerfile
+    container_name: google-search-ai-browser-worker-19
+    environment:
+      - WORKER_PORT=4101
+      - WORKER_TIMEOUT_MS=10000
+      - CHROME_BINARY=/usr/bin/chromium
+      - CHROMEDRIVER=/usr/bin/chromedriver
+      - SESSION_PER_SEARCH=0
+      - USE_UC=0
+      - PY_WORKER_PROFILES=/data/.ai_mode_chrome_19a,/data/.ai_mode_chrome_19b
+      # Proxy configuration
+      - PROXY_LIST=${PROXY_LIST:-}
+      - PROXY_URL=${PROXY_URL:-}
+      - PROXY_BINDING_MODE=${PROXY_BINDING_MODE:-independent}
+      - REDIS_URL=redis://redis:6379
+      - COORDINATOR_URL=${COORDINATOR_URL:-http://proxy-coordinator:4200}
+      - PY_PAGE_TIMEOUT_SEC=${PY_PAGE_TIMEOUT_SEC:-45}
+      - PY_ANSWER_TIMEOUT_SEC=${PY_ANSWER_TIMEOUT_SEC:-20}
+      - PY_AI_READY_TIMEOUT_SEC=${PY_AI_READY_TIMEOUT_SEC:-25}
+      - PY_AI_READY_TIMEOUT_PER_SEARCH_SEC=${PY_AI_READY_TIMEOUT_PER_SEARCH_SEC:-8}
+      - PY_SEARCH_PAGE_OPEN_TIMEOUT_SEC=${PY_SEARCH_PAGE_OPEN_TIMEOUT_SEC:-12}
+      - PY_NEW_SEARCH_BUTTON_WAIT_SEC=${PY_NEW_SEARCH_BUTTON_WAIT_SEC:-3}
+      - PY_QUIT_TIMEOUT_SEC=${PY_QUIT_TIMEOUT_SEC:-5}
+      - CLEANUP_ENABLED=1
+      - CLEANUP_INTERVAL_MINUTES=120
+      - CLEANUP_MIN_AGE_MINUTES=60
+      - CLEANUP_INCLUDE_ACTIVE_CACHES=0
+      - MAX_CHROME_MEMORY_MB=1500
+      - MIN_CHROME_PROCESSES=2
+    volumes:
+      - python_worker_data_19:/data
+    expose:
+      - "4101"
+      - "4102"
+      - "3001"
+    networks:
+      - app_net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "/app/healthcheck.py"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+
+  browser-worker-20:
+    profiles: ["worker20"]
+    build:
+      context: ./tools/browser-worker
+      dockerfile: Dockerfile
+    container_name: google-search-ai-browser-worker-20
+    environment:
+      - WORKER_PORT=4101
+      - WORKER_TIMEOUT_MS=10000
+      - CHROME_BINARY=/usr/bin/chromium
+      - CHROMEDRIVER=/usr/bin/chromedriver
+      - SESSION_PER_SEARCH=0
+      - USE_UC=0
+      - PY_WORKER_PROFILES=/data/.ai_mode_chrome_20a,/data/.ai_mode_chrome_20b
+      # Proxy configuration
+      - PROXY_LIST=${PROXY_LIST:-}
+      - PROXY_URL=${PROXY_URL:-}
+      - PROXY_BINDING_MODE=${PROXY_BINDING_MODE:-independent}
+      - REDIS_URL=redis://redis:6379
+      - COORDINATOR_URL=${COORDINATOR_URL:-http://proxy-coordinator:4200}
+      - PY_PAGE_TIMEOUT_SEC=${PY_PAGE_TIMEOUT_SEC:-45}
+      - PY_ANSWER_TIMEOUT_SEC=${PY_ANSWER_TIMEOUT_SEC:-20}
+      - PY_AI_READY_TIMEOUT_SEC=${PY_AI_READY_TIMEOUT_SEC:-25}
+      - PY_AI_READY_TIMEOUT_PER_SEARCH_SEC=${PY_AI_READY_TIMEOUT_PER_SEARCH_SEC:-8}
+      - PY_SEARCH_PAGE_OPEN_TIMEOUT_SEC=${PY_SEARCH_PAGE_OPEN_TIMEOUT_SEC:-12}
+      - PY_NEW_SEARCH_BUTTON_WAIT_SEC=${PY_NEW_SEARCH_BUTTON_WAIT_SEC:-3}
+      - PY_QUIT_TIMEOUT_SEC=${PY_QUIT_TIMEOUT_SEC:-5}
+      - CLEANUP_ENABLED=1
+      - CLEANUP_INTERVAL_MINUTES=120
+      - CLEANUP_MIN_AGE_MINUTES=60
+      - CLEANUP_INCLUDE_ACTIVE_CACHES=0
+      - MAX_CHROME_MEMORY_MB=1500
+      - MIN_CHROME_PROCESSES=2
+    volumes:
+      - python_worker_data_20:/data
+    expose:
+      - "4101"
+      - "4102"
+      - "3001"
+    networks:
+      - app_net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "/app/healthcheck.py"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+
+    # Health monitoring service
+  worker-monitor:
+    build:
+      context: ./tools/monitoring
+      dockerfile: Dockerfile
+    container_name: google-search-ai-worker-monitor
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      - CHECK_INTERVAL=20
+      - LOG_LEVEL=INFO
+      - DOCKER_SOCKET=/var/run/docker.sock
+      - HEALTH_CHECK_TIMEOUT=5
+      - RESTART_WAIT_TIME=30
+      - MAX_RESTART_ATTEMPTS=3
+    networks:
+      - app_net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 60s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+volumes:
+  caddy_data:
+  caddy_config:
+  redis_data:
+  python_worker_data:
+  python_worker_data_2:
+  python_worker_data_3:
+  python_worker_data_4:
+  python_worker_data_5:
+  python_worker_data_6:
+  python_worker_data_7:
+  python_worker_data_8:
+  python_worker_data_9:
+  python_worker_data_10:
+  python_worker_data_11:
+  python_worker_data_12:
+  python_worker_data_13:
+  python_worker_data_14:
+  python_worker_data_15:
+  python_worker_data_16:
+  python_worker_data_17:
+  python_worker_data_18:
+  python_worker_data_19:
+  python_worker_data_20:
+
+networks:
+  app_net:
+    driver: bridge
