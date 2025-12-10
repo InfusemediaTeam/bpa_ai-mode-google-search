@@ -91,6 +91,7 @@ services:
     environment:
       - PORT=4001
       - NODE_ENV=production
+      - DOMAIN=${DOMAIN:-}
       - LOG_DIR=/usr/src/app/logs
       - REDIS_URL=redis://redis:6379
       - WORKER_BASE_URLS=${WORKER_BASE_URLS:-http://browser-worker:4101,http://browser-worker-2:4101,http://browser-worker-3:4101,http://browser-worker-4:4101,http://browser-worker-5:4101,http://browser-worker-6:4101,http://browser-worker-7:4101,http://browser-worker-8:4101,http://browser-worker-9:4101,http://browser-worker-10:4101,http://browser-worker-11:4101,http://browser-worker-12:4101,http://browser-worker-13:4101,http://browser-worker-14:4101,http://browser-worker-15:4101,http://browser-worker-16:4101,http://browser-worker-17:4101,http://browser-worker-18:4101,http://browser-worker-19:4101,http://browser-worker-20:4101}

@@ -36,14 +36,22 @@ async function bootstrap() {
   
   // Swagger/OpenAPI documentation
   const port = configService.get<number>('PORT') || 3100;
-  const config = new DocumentBuilder()
+  const domain = configService.get<string>('DOMAIN');
+  
+  const documentBuilder = new DocumentBuilder()
     .setTitle('Universal Prompt Service API')
     .setDescription('Universal service for processing prompts via worker pool. API follows n8n contracts.')
     .setVersion('1.0')
-    .addServer(`http://localhost:${port}`, 'Local Development')
     .addTag('search-intelligence/searcher', 'Prompt processing operations')
-    .addTag('health', 'Health check endpoints')
-    .build();
+    .addTag('health', 'Health check endpoints');
+  
+  if (domain) {
+    documentBuilder.addServer(`https://${domain}`, 'Production');
+  } else {
+    documentBuilder.addServer(`http://localhost:${port}`, 'Local Development');
+  }
+  
+  const config = documentBuilder.build();
   
   const document = SwaggerModule.createDocument(app, config);
   SwaggerModule.setup('api/docs', app, document, {
