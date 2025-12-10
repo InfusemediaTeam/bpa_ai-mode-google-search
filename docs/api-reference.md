@@ -5,7 +5,7 @@ This document describes the REST API endpoints of the Universal Prompt Service.
 ## Base URL
 
 ```
-http://localhost:4001/search-intelligence/searcher/v1
+https://ai-search.instagingserver.com/search-intelligence/searcher/v1
 ```
 
 API paths follow n8n contract format: `/{businessFlow}/{tool}/v{major}/{action}`
@@ -94,7 +94,7 @@ POST /search-intelligence/searcher/v1/prompts
 
 **Example:**
 ```bash
-curl -X POST http://localhost:4001/search-intelligence/searcher/v1/prompts \
+curl -X POST https://ai-search.instagingserver.com/search-intelligence/searcher/v1/prompts \
   -H "Content-Type: application/json" \
   -H "X-Request-Id: $(uuidgen)" \
   -d '{"prompt": "What is the email pattern for company.com?"}'
@@ -169,7 +169,7 @@ GET /search-intelligence/searcher/v1/jobs/{jobId}
 
 **Example:**
 ```bash
-curl http://localhost:4001/search-intelligence/searcher/v1/jobs/123 \
+curl https://ai-search.instagingserver.com/search-intelligence/searcher/v1/jobs/123 \
   -H "X-Request-Id: $(uuidgen)"
 ```
 
@@ -228,15 +228,15 @@ GET /search-intelligence/searcher/v1/jobs
 **Example:**
 ```bash
 # Get all jobs
-curl http://localhost:4001/search-intelligence/searcher/v1/jobs \
+curl https://ai-search.instagingserver.com/search-intelligence/searcher/v1/jobs \
   -H "X-Request-Id: $(uuidgen)"
 
 # Get only completed jobs
-curl "http://localhost:4001/search-intelligence/searcher/v1/jobs?status=completed" \
+curl "https://ai-search.instagingserver.com/search-intelligence/searcher/v1/jobs?status=completed" \
   -H "X-Request-Id: $(uuidgen)"
 
 # Paginate
-curl "http://localhost:4001/search-intelligence/searcher/v1/jobs?limit=10&pageToken=eyJvZmZzZXQiOjEwfQ==" \
+curl "https://ai-search.instagingserver.com/search-intelligence/searcher/v1/jobs?limit=10&pageToken=eyJvZmZzZXQiOjEwfQ==" \
   -H "X-Request-Id: $(uuidgen)"
 ```
 
@@ -313,7 +313,7 @@ GET /search-intelligence/searcher/v1/health
 
 **Example:**
 ```bash
-curl http://localhost:4001/search-intelligence/searcher/v1/health \
+curl https://ai-search.instagingserver.com/search-intelligence/searcher/v1/health \
   -H "X-Request-Id: $(uuidgen)"
 ```
 
@@ -340,5 +340,5 @@ curl http://localhost:4001/search-intelligence/searcher/v1/health \
 Interactive API documentation is available at:
 
 ```
-http://localhost:4001/api/docs
+https://ai-search.instagingserver.com/api/docs
 ```
