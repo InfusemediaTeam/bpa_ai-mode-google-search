@@ -2,9 +2,8 @@ import { Module } from '@nestjs/common';
 import { BullModule } from '@nestjs/bull';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { LoggingModule } from './modules/logging/logging.module';
-import { HealthModule } from './modules/health/health.module';
 import { RedisModule } from './modules/redis/redis.module';
-import { PromptModule } from './modules/prompt/prompt.module';
+import { SearcherModule } from './api/v1/search-intelligence/searcher/searcher.module';
 import { AppConfigModule } from './config/config.module';
 import { validate } from './config/env.validation';
 
@@ -16,7 +15,6 @@ import { validate } from './config/env.validation';
     }),
     AppConfigModule,
     LoggingModule,
-    HealthModule,
     RedisModule,
     BullModule.forRootAsync({
       imports: [ConfigModule],
@@ -43,7 +41,7 @@ import { validate } from './config/env.validation';
         };
       },
     }),
-    PromptModule,
+    SearcherModule,
   ],
 })
 export class AppModule {}

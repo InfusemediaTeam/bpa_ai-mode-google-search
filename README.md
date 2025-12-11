@@ -35,27 +35,29 @@ docker compose -f docker-compose.yml -f docker-compose.direct.yml up -d
 
 ```bash
 # Health check
-curl http://localhost:4001/search-intelligence/searcher/v1/health \
+curl http://localhost:4001/api/v1/search-intelligence/searcher/health \
   -H "X-Request-Id: test-$(date +%s)"
 ```
 
 ## API Overview
 
-Base URL: `http://localhost:4001/search-intelligence/searcher/v1`
+Base URL: `http://localhost:4001/api/v1/search-intelligence/searcher`
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | POST | `/prompts` | Submit prompt for processing |
 | GET | `/jobs/{jobId}` | Get job status and result |
 | GET | `/jobs` | List all jobs with pagination |
-| GET | `/health` | Health check |
+| GET | `/health` | Health check with worker status |
+| GET | `/logs` | Read application logs |
+| GET | `/logs/files` | List available log files |
 
 **Required Header:** `X-Request-Id` (correlation ID)
 
 ### Example: Submit Prompt
 
 ```bash
-curl -X POST http://localhost:4001/search-intelligence/searcher/v1/prompts \
+curl -X POST http://localhost:4001/api/v1/search-intelligence/searcher/prompts \
   -H "Content-Type: application/json" \
   -H "X-Request-Id: $(uuidgen)" \
   -d '{"prompt": "What is the email pattern for company.com?"}'
@@ -72,7 +74,7 @@ Response (202 Accepted):
 ### Example: Get Result
 
 ```bash
-curl http://localhost:4001/search-intelligence/searcher/v1/jobs/123 \
+curl http://localhost:4001/api/v1/search-intelligence/searcher/jobs/123 \
   -H "X-Request-Id: $(uuidgen)"
 ```
 

@@ -1,8 +1,8 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bull';
 import type { Queue, JobStatus } from 'bull';
-import { JobStatusDto, JobState } from './dto/job-status.dto';
-import { TimeoutsService } from '../../config/timeouts';
+import { JobStatusDto, JobState } from '../dto/job-status.dto';
+import { TimeoutsService } from '../../../../../config/timeouts';
 
 export interface PromptJobData {
   prompt: string;
@@ -16,8 +16,8 @@ export interface PromptJobResult {
 }
 
 @Injectable()
-export class PromptService {
-  private readonly logger = new Logger(PromptService.name);
+export class SearcherService {
+  private readonly logger = new Logger(SearcherService.name);
 
   constructor(
     @InjectQueue('prompt') private readonly promptQueue: Queue,
@@ -72,7 +72,7 @@ export class PromptService {
   }
 
   /**
-   * Get all jobs with cursor-based pagination (per n8n contract)
+   * Get all jobs with cursor-based pagination
    */
   async getAllJobs(
     status?: string,
@@ -91,7 +91,6 @@ export class PromptService {
     if (status) {
       allJobs = await this.promptQueue.getJobs([status as JobStatus]);
     } else {
-      // Get all jobs from all states
       const [waiting, active, completed, failed, delayed] = await Promise.all([
         this.promptQueue.getJobs(['waiting']),
         this.promptQueue.getJobs(['active']),
@@ -102,12 +101,10 @@ export class PromptService {
       allJobs = [...waiting, ...active, ...completed, ...failed, ...delayed];
     }
 
-    // Sort by timestamp descending (newest first)
     allJobs.sort((a, b) => b.timestamp - a.timestamp);
 
     const totalItems = allJobs.length;
 
-    // Apply cursor-based pagination
     let startIndex = 0;
     if (pageToken) {
       try {
@@ -130,7 +127,6 @@ export class PromptService {
       }
     }
 
-    // Generate next page token if there are more items
     let nextPageToken: string | undefined;
     if (startIndex + limit < totalItems) {
       nextPageToken = Buffer.from(JSON.stringify({ offset: startIndex + limit })).toString('base64');
@@ -146,9 +142,6 @@ export class PromptService {
     };
   }
 
-  /**
-   * Map Bull job state to our JobState enum
-   */
   private mapState(state: string): JobState {
     switch (state) {
       case 'waiting':

@@ -48,6 +48,18 @@ export class HttpExceptionFilter implements ExceptionFilter {
         message = exceptionResponse;
       } else if (typeof exceptionResponse === 'object') {
         const resp = exceptionResponse as any;
+        
+        // If response already has error object in contract format, use it directly
+        if (resp.error && typeof resp.error === 'object' && resp.error.code) {
+          response.status(status).json({
+            error: resp.error,
+            meta: {
+              requestId,
+            },
+          });
+          return;
+        }
+        
         message = resp.message || resp.error || 'An error occurred';
         
         // Handle validation errors from class-validator
