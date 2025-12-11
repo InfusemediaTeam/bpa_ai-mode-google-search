@@ -25,23 +25,34 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
             return
         
         try:
-            # Quick check: Chrome processes exist
+            # Quick check: Chrome processes exist AND are not zombies
             chrome_alive = False
             chrome_count = 0
+            zombie_count = 0
             
-            for proc in psutil.process_iter(['name']):
+            for proc in psutil.process_iter(['name', 'status']):
                 try:
                     name = proc.info['name'].lower()
-                    if 'chromium' in name or 'chrome' in name:
-                        chrome_alive = True
+                    status = proc.info.get('status', '')
+                    # Check for actual chromium browser process (not chromedriver)
+                    # chromedriver has 'chromedriver' in name, browser has 'chromium' or 'chrome'
+                    is_browser = ('chromium' in name or 'chrome' in name) and 'driver' not in name
+                    if is_browser:
                         chrome_count += 1
+                        # Check if process is zombie/defunct
+                        if status in ['zombie', 'dead'] or status == psutil.STATUS_ZOMBIE:
+                            zombie_count += 1
+                        else:
+                            chrome_alive = True  # At least one live browser process
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     continue
             
-            # Return status
+            # Return status - only OK if we have at least one LIVE (non-zombie) browser process
             response = {
                 "ok": chrome_alive,
                 "chrome_processes": chrome_count,
+                "zombie_processes": zombie_count,
+                "live_processes": chrome_count - zombie_count,
                 "pid": os.getpid()
             }
             

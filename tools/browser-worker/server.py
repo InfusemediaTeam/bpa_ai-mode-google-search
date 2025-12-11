@@ -74,13 +74,20 @@ async def health():
     # Check 1: If busy, worker is healthy (actively processing)
     is_busy = busy_lock.locked()
     
-    # Check 2: Chrome processes exist (via psutil, non-blocking)
+    # Check 2: Chrome processes exist AND are not zombies (via psutil, non-blocking)
     chrome_alive = False
     try:
         import psutil
-        for proc in psutil.process_iter(['name']):
+        for proc in psutil.process_iter(['name', 'status']):
             try:
-                if 'chromium' in proc.info['name'].lower() or 'chrome' in proc.info['name'].lower():
+                name = proc.info['name'].lower()
+                status = proc.info.get('status', '')
+                # Check for actual chromium browser process (not chromedriver)
+                is_browser = ('chromium' in name or 'chrome' in name) and 'driver' not in name
+                if is_browser:
+                    # Skip zombie/defunct processes
+                    if status in ['zombie', 'dead'] or status == psutil.STATUS_ZOMBIE:
+                        continue
                     chrome_alive = True
                     break
             except (psutil.NoSuchProcess, psutil.AccessDenied):
@@ -94,6 +101,9 @@ async def health():
     # - Chrome alive (ready for work)
     warmup_in_progress = not STARTUP_READY
     ok = warmup_in_progress or is_busy or chrome_alive
+    
+    # ready should be false if chrome is dead (even if warmup completed before)
+    actually_ready = STARTUP_READY and chrome_alive
     
     # Get browser info
     browser_name = "chromium" if os.environ.get("CHROME_BINARY", "").endswith("chromium") else "chrome"
@@ -115,7 +125,7 @@ async def health():
         "ok": ok,
         "busy": is_busy,
         "chrome_alive": chrome_alive,
-        "ready": STARTUP_READY,
+        "ready": actually_ready,
         "warmup": warmup_in_progress,
         "browser": browser_name,
         "version": browser_version,

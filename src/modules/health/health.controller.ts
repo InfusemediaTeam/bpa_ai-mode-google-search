@@ -54,15 +54,30 @@ export class HealthController {
         healthy: healthyWorkers.length,
         busy: busyWorkers.length,
         status: allWorkersOk ? 'ok' : (anyWorkerOk ? 'degraded' : 'fail'),
-        details: workersHealth.map(w => ({
-          id: w.workerId,
-          ok: w.ok,
-          busy: ('busy' in w && w.busy) || false,
-          ready: ('ready' in w && w.ready) || false,
-          browser: ('browser' in w && w.browser) || 'unknown',
-          version: ('version' in w && w.version) ?? null,
-          error: w.ok ? null : (('error' in w && w.error) || 'unknown error'),
-        })),
+        details: workersHealth.map(w => {
+          // Determine error message based on worker state
+          let errorMsg: string | null = null;
+          if (!w.ok) {
+            if ('chrome_alive' in w && !w.chrome_alive) {
+              errorMsg = 'browser crashed or zombie';
+            } else if ('error' in w && w.error) {
+              errorMsg = w.error as string;
+            } else {
+              errorMsg = 'unknown error';
+            }
+          }
+          
+          return {
+            id: w.workerId,
+            ok: w.ok,
+            busy: ('busy' in w && w.busy) || false,
+            ready: ('ready' in w && w.ready) || false,
+            browser: ('browser' in w && w.browser) || 'unknown',
+            version: ('version' in w && w.version) ?? null,
+            chromeAlive: ('chrome_alive' in w) ? w.chrome_alive : null,
+            error: errorMsg,
+          };
+        }),
       },
       timestamp: new Date().toISOString(),
     };

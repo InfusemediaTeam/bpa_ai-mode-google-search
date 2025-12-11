@@ -53,7 +53,7 @@ def check_server_responding():
             return False
 
 def check_chrome_alive():
-    """Quick check if Chrome processes exist (not zombie)."""
+    """Quick check if Chrome processes exist (not zombie, not chromedriver)."""
     try:
         chrome_count = 0
         zombie_count = 0
@@ -61,21 +61,24 @@ def check_chrome_alive():
         for proc in psutil.process_iter(['name', 'status']):
             try:
                 name = proc.info['name'].lower()
-                if 'chromium' in name or 'chrome' in name:
+                status = proc.info.get('status', '')
+                # Check for actual chromium browser process (not chromedriver)
+                is_browser = ('chromium' in name or 'chrome' in name) and 'driver' not in name
+                if is_browser:
                     chrome_count += 1
-                    if proc.info['status'] in ['zombie', 'dead']:
+                    if status in ['zombie', 'dead'] or status == psutil.STATUS_ZOMBIE:
                         zombie_count += 1
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue
         
-        # Need at least 1 Chrome process (relaxed from 2)
-        if chrome_count < 1:
-            print(f"[HEALTHCHECK] No Chrome processes found")
-            return False
+        live_count = chrome_count - zombie_count
         
-        # Zombie processes are OK if there are enough live processes
-        if zombie_count > 0 and chrome_count - zombie_count < 1:
-            print(f"[HEALTHCHECK] Only zombie Chrome processes ({zombie_count})")
+        # Need at least 1 LIVE Chrome process
+        if live_count < 1:
+            if zombie_count > 0:
+                print(f"[HEALTHCHECK] Only zombie Chrome processes ({zombie_count} zombie, {chrome_count} total)")
+            else:
+                print(f"[HEALTHCHECK] No Chrome browser processes found")
             return False
         
         return True

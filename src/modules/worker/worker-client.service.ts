@@ -18,6 +18,7 @@ export interface WorkerHealth {
   browser?: string;
   ready?: boolean;
   version?: string | null;
+  chrome_alive?: boolean;
   error?: string;
 }
 

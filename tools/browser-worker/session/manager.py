@@ -39,7 +39,7 @@ except Exception as e:
 
 
 def is_driver_valid(driver: webdriver.Chrome) -> bool:
-    """Check if driver session is still valid.
+    """Check if driver session is still valid AND browser process is alive.
     
     Args:
         driver: Chrome driver instance to check
@@ -51,11 +51,92 @@ def is_driver_valid(driver: webdriver.Chrome) -> bool:
         return False
     
     try:
-        # Try to get current URL - this will fail if session is invalid
+        # Check 1: Driver session must respond
         _ = driver.current_url
+        
+        # Check 2: Browser process must be alive (not zombie)
+        # This catches cases where chromedriver is alive but chromium crashed
+        import psutil
+        chrome_alive = False
+        for proc in psutil.process_iter(['name', 'status']):
+            try:
+                name = proc.info['name'].lower()
+                status = proc.info.get('status', '')
+                # Check for actual chromium browser process (not chromedriver)
+                is_browser = ('chromium' in name or 'chrome' in name) and 'driver' not in name
+                if is_browser:
+                    # Skip zombie/defunct processes
+                    if status in ['zombie', 'dead'] or status == psutil.STATUS_ZOMBIE:
+                        continue
+                    chrome_alive = True
+                    break
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+        
+        if not chrome_alive:
+            print("[SESSION] Browser process is dead or zombie - driver invalid")
+            return False
+        
         return True
-    except Exception:
+    except Exception as e:
+        print(f"[SESSION] Driver validation failed: {e}")
         return False
+
+
+def kill_zombie_chrome_processes() -> int:
+    """Kill zombie/defunct Chrome processes and their parent chromedrivers.
+    
+    Zombie processes occur when chromium crashes but chromedriver doesn't reap it.
+    We need to kill the parent chromedriver to clean up properly.
+    
+    Returns:
+        Number of processes killed
+    """
+    import psutil
+    import os
+    import signal
+    
+    killed = 0
+    zombie_pids = []
+    chromedriver_pids_to_kill = set()
+    
+    # First pass: find zombie chrome processes and their parents
+    for proc in psutil.process_iter(['pid', 'ppid', 'name', 'status']):
+        try:
+            name = proc.info['name'].lower()
+            status = proc.info.get('status', '')
+            is_browser = ('chromium' in name or 'chrome' in name) and 'driver' not in name
+            
+            if is_browser and (status in ['zombie', 'dead'] or status == psutil.STATUS_ZOMBIE):
+                zombie_pids.append(proc.info['pid'])
+                # Mark parent chromedriver for killing
+                ppid = proc.info.get('ppid')
+                if ppid and ppid > 1:
+                    chromedriver_pids_to_kill.add(ppid)
+                    
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    
+    if not zombie_pids:
+        return 0
+    
+    print(f"[ZOMBIE_CLEANUP] Found {len(zombie_pids)} zombie Chrome processes: {zombie_pids}")
+    print(f"[ZOMBIE_CLEANUP] Parent chromedrivers to kill: {list(chromedriver_pids_to_kill)}")
+    
+    # Kill parent chromedrivers first (this will also reap zombies)
+    for pid in chromedriver_pids_to_kill:
+        try:
+            os.kill(pid, signal.SIGKILL)
+            killed += 1
+            print(f"[ZOMBIE_CLEANUP] Killed chromedriver PID {pid}")
+        except (ProcessLookupError, PermissionError) as e:
+            print(f"[ZOMBIE_CLEANUP] Failed to kill PID {pid}: {e}")
+    
+    # Wait a moment for zombies to be reaped by tini
+    import time
+    time.sleep(0.5)
+    
+    return killed
 
 
 def safe_quit_driver(driver: webdriver.Chrome, timeout: int = QUIT_TIMEOUT_SEC) -> bool:
@@ -82,8 +163,13 @@ def safe_quit_driver(driver: webdriver.Chrome, timeout: int = QUIT_TIMEOUT_SEC) 
     quit_thread.join(timeout=timeout)
     
     if quit_thread.is_alive():
-        print(f"[QUIT] driver.quit() timed out after {timeout}s - driver will be cleaned by tini")
+        print(f"[QUIT] driver.quit() timed out after {timeout}s - killing zombie processes")
+        # Kill any zombie chrome processes and their parents
+        kill_zombie_chrome_processes()
         return False
+    
+    # Even on successful quit, check for zombies (chromedriver may not reap properly)
+    kill_zombie_chrome_processes()
     return True
 
 
