@@ -37,6 +37,64 @@ except Exception as e:
     REDIS_AVAILABLE = False
     print(f"[REDIS] Not available: {e}")
 
+# Proxy health check timeout
+PROXY_CHECK_TIMEOUT = int(os.environ.get("PROXY_CHECK_TIMEOUT_SEC", "5"))
+
+# Coordinator URL for proxy block notifications
+COORDINATOR_URL = os.environ.get("COORDINATOR_URL", "http://proxy-coordinator:4200")
+
+
+def check_proxy_connectivity(proxy_url: str, timeout: int = PROXY_CHECK_TIMEOUT) -> bool:
+    """Check if proxy is reachable by making a test connection.
+    
+    Args:
+        proxy_url: Proxy URL (with or without http:// prefix)
+        timeout: Connection timeout in seconds
+        
+    Returns:
+        True if proxy is reachable, False otherwise
+    """
+    try:
+        import httpx
+        
+        # Normalize proxy URL
+        if not proxy_url.startswith("http"):
+            proxy_url = f"http://{proxy_url}"
+        
+        # Try to connect through proxy to a reliable endpoint
+        with httpx.Client(proxy=proxy_url, timeout=timeout) as client:
+            response = client.get("https://www.google.com/generate_204")
+            # Google returns 204 No Content for this endpoint
+            return response.status_code in [200, 204]
+    except Exception as e:
+        print(f"[PROXY_CHECK] Proxy {proxy_url.split('@')[-1] if '@' in proxy_url else proxy_url} failed: {e}")
+        return False
+
+
+def notify_proxy_blocked(proxy_idx: int, reason: str) -> None:
+    """Notify proxy coordinator that a proxy should be blocked.
+    
+    Args:
+        proxy_idx: Index of the proxy to block
+        reason: Reason for blocking
+    """
+    if proxy_idx < 0:
+        return
+    
+    try:
+        import httpx
+        with httpx.Client(timeout=5) as client:
+            response = client.post(
+                f"{COORDINATOR_URL}/block-proxy",
+                json={"proxy_idx": proxy_idx, "reason": reason}
+            )
+            if response.status_code == 200:
+                print(f"[PROXY_BLOCK] Notified coordinator: proxy {proxy_idx} blocked ({reason})")
+            else:
+                print(f"[PROXY_BLOCK] Coordinator returned {response.status_code}")
+    except Exception as e:
+        print(f"[PROXY_BLOCK] Failed to notify coordinator: {e}")
+
 
 def is_driver_valid(driver: webdriver.Chrome) -> bool:
     """Check if driver session is still valid AND browser process is alive.
@@ -512,35 +570,64 @@ class SessionManager:
         """Select proxy based on PROXY_BINDING_MODE and shared/local indices.
         
         Skips blocked proxies automatically.
+        Checks proxy connectivity before returning and blocks unreachable proxies.
         """
         if not PROXY_LIST and not PROXY_URL:
             return None
         
         if PROXY_LIST:
-            if PROXY_BINDING_MODE == "by_profile":
-                # Bind proxy to profile
-                if self.profile_idx >= 0:
-                    base_idx = self.profile_idx % len(PROXY_LIST)
-                else:
-                    base_idx = 0
-                # Find next available (non-blocked) proxy
-                idx = self._get_next_available_proxy_idx(base_idx)
-                # For by_profile mode, driver_proxy_idx is not used (no shared rotation)
-                self.driver_proxy_idx = -1
-            else:  # independent - use shared index from Redis
-                shared_idx = self._get_shared_proxy_idx()
-                base_idx = shared_idx % len(PROXY_LIST)
-                # Find next available (non-blocked) proxy
-                idx = self._get_next_available_proxy_idx(base_idx)
-                # Remember which proxy index was used for current driver
-                self.driver_proxy_idx = shared_idx
+            # Try each proxy until we find a working one
+            tried_proxies = set()
             
-            proxy = PROXY_LIST[idx]
-            if PROXY_BINDING_MODE == "independent":
-                print(f"[PROXY] Selected proxy {idx}/{len(PROXY_LIST)} (shared_idx={self.driver_proxy_idx}): {proxy.split('@')[-1] if '@' in proxy else proxy}")
-            else:
-                print(f"[PROXY] Selected proxy {idx}/{len(PROXY_LIST)} (by_profile): {proxy.split('@')[-1] if '@' in proxy else proxy}")
-            return proxy
+            while len(tried_proxies) < len(PROXY_LIST):
+                if PROXY_BINDING_MODE == "by_profile":
+                    # Bind proxy to profile
+                    if self.profile_idx >= 0:
+                        base_idx = self.profile_idx % len(PROXY_LIST)
+                    else:
+                        base_idx = 0
+                    # Find next available (non-blocked) proxy
+                    idx = self._get_next_available_proxy_idx(base_idx)
+                    # For by_profile mode, driver_proxy_idx is not used (no shared rotation)
+                    self.driver_proxy_idx = -1
+                else:  # independent - use shared index from Redis
+                    shared_idx = self._get_shared_proxy_idx()
+                    base_idx = shared_idx % len(PROXY_LIST)
+                    # Find next available (non-blocked) proxy
+                    idx = self._get_next_available_proxy_idx(base_idx)
+                    # Remember which proxy index was used for current driver
+                    self.driver_proxy_idx = shared_idx
+                
+                if idx is None:
+                    print(f"[PROXY] No available proxies!")
+                    return None
+                
+                # Skip if we already tried this proxy
+                if idx in tried_proxies:
+                    break
+                tried_proxies.add(idx)
+                
+                proxy = PROXY_LIST[idx]
+                proxy_display = proxy.split('@')[-1] if '@' in proxy else proxy
+                
+                if PROXY_BINDING_MODE == "independent":
+                    print(f"[PROXY] Testing proxy {idx}/{len(PROXY_LIST)} (shared_idx={self.driver_proxy_idx}): {proxy_display}")
+                else:
+                    print(f"[PROXY] Testing proxy {idx}/{len(PROXY_LIST)} (by_profile): {proxy_display}")
+                
+                # Check proxy connectivity before using
+                if check_proxy_connectivity(proxy):
+                    print(f"[PROXY] ✓ Proxy {proxy_display} is reachable")
+                    return proxy
+                else:
+                    print(f"[PROXY] ✗ Proxy {proxy_display} is NOT reachable - blocking and notifying coordinator")
+                    # Block this proxy and notify coordinator
+                    self._mark_proxy_blocked(idx)
+                    notify_proxy_blocked(idx, "connectivity_check_failed")
+            
+            # All proxies failed
+            print(f"[PROXY] ERROR: All {len(PROXY_LIST)} proxies failed connectivity check!")
+            return None
         else:
             return PROXY_URL
     

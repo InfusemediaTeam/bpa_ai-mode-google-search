@@ -169,26 +169,62 @@ Client                API                  Redis
 | `completed` | Job finished successfully |
 | `failed` | Job failed after all retries |
 
-## Retry Logic
+## Worker Selection & Retry Logic
 
-The service implements robust retry logic with exponential backoff:
+The service implements robust worker selection that **never fails** due to busy workers:
 
-1. **Quick Retries** - Try up to `RETRY_MAX_ATTEMPTS` times with exponential backoff
-2. **Worker Failover** - If preferred worker fails, try other healthy workers
-3. **Recovery Wait** - If all workers are unhealthy, wait up to `RETRY_WAIT_FOR_WORKER_MAX_MS`
-4. **Health Checks** - Periodically check worker health during recovery wait
+### Worker Selection Flow
 
 ```
-Attempt 1 ──▶ Fail ──▶ Wait 1s ──▶ Attempt 2 ──▶ Fail ──▶ Wait 2s ──▶ Attempt 3
-                                                                          │
-                                                                          ▼
-                                                                    All failed?
-                                                                          │
-                                                              ┌───────────┴───────────┐
-                                                              ▼                       ▼
-                                                        Wait for healthy       Mark as failed
-                                                        worker (up to 5min)
+┌─────────────────────────────────────────────────────────────────┐
+│                    searchWithRetry()                            │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  ┌──────────────────┐                                          │
+│  │ findFreeWorker() │◀────────────────────────────────┐        │
+│  │ (parallel health │                                  │        │
+│  │  check all)      │                                  │        │
+│  └────────┬─────────┘                                  │        │
+│           │                                            │        │
+│           ▼                                            │        │
+│    ┌──────────────┐     No      ┌──────────────┐      │        │
+│    │ Free worker? │────────────▶│ Wait 2 sec   │──────┘        │
+│    └──────┬───────┘             └──────────────┘               │
+│           │ Yes                                                 │
+│           ▼                                                     │
+│    ┌──────────────┐                                            │
+│    │ POST /search │                                            │
+│    └──────┬───────┘                                            │
+│           │                                                     │
+│           ▼                                                     │
+│    ┌──────────────────────────────────────────────┐            │
+│    │                  Result?                      │            │
+│    ├──────────────────────────────────────────────┤            │
+│    │ ✓ Success (200)     → Return result          │            │
+│    │ ✓ Empty (422)       → Return raw_text        │            │
+│    │ ✗ Busy (423)        → Retry (find another)   │            │
+│    │ ✗ Google blocked    → Retry (proxy rotates)  │            │
+│    │ ✗ Other error       → Retry (find another)   │            │
+│    └──────────────────────────────────────────────┘            │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
 ```
+
+### Key Behaviors
+
+| Scenario | Action | Job Fails? |
+|----------|--------|------------|
+| All workers busy (423) | Wait 2s, retry indefinitely | **No** |
+| Worker blocked by Google | Worker rotates proxy, retry | **No** |
+| Worker returns empty (422) | Return raw_text as result | **No** |
+| Worker error (timeout, etc.) | Retry with another worker | **No** |
+
+### Implementation Details
+
+1. **Parallel Health Check** - All workers checked simultaneously via `/health`
+2. **Free Worker Criteria** - `ok=true`, `busy=false`, `ready=true`
+3. **Infinite Retry** - Job waits indefinitely until a worker completes
+4. **No Job Failures** - Jobs only fail on unrecoverable errors (none currently defined)
 
 ## Scaling
 

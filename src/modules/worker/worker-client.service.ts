@@ -283,71 +283,111 @@ export class WorkerClientService implements OnModuleInit {
   }
 
   /**
-   * Search - try workers sequentially until one accepts
+   * Search - find free worker and execute search
    *
-   * Workers return 423 instantly if busy, so sequential check is fast.
-   * Bull handles concurrency - multiple jobs run in parallel on different workers.
+   * Finds first available worker via health check, then sends request.
+   * Retries indefinitely until a worker completes the job.
    *
-   * NO retry when:
-   * - Worker returned result (even empty) - 422 empty_result → job completes
-   * - Worker is blocked by Google - 503 → job fails
+   * Returns immediately when:
+   * - Worker returned result (even empty) - 422 empty_result → job completes with raw_text
+   *
+   * Retries when:
+   * - All workers busy (423) - waits and retries
+   * - Worker blocked by Google - worker rotates proxy, retry with another
+   * - Any other error - retry with another worker
    */
+  /**
+   * Find first available (not busy) worker
+   * Returns worker number (1-based) or null if all busy
+   */
+  private async findFreeWorker(): Promise<number | null> {
+    const workerCount = this.getWorkerCount();
+
+    // Check all workers in parallel for speed
+    const healthChecks = await Promise.all(
+      Array.from({ length: workerCount }, (_, i) => this.health(i + 1)),
+    );
+
+    for (let i = 0; i < workerCount; i++) {
+      const h = healthChecks[i];
+      if (h.ok && !h.busy && h.ready !== false) {
+        return i + 1; // 1-based index
+      }
+    }
+
+    return null;
+  }
+
   async searchWithRetry(
     prompt: string,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     _preferredWorker?: number,
   ): Promise<SearchResult & { usedWorker: number }> {
-    const workerCount = this.getWorkerCount();
-    let lastError: ErrorWithExtras | null = null;
+    const retryDelayMs = 2000; // Wait 2 seconds between retries
+    let attempt = 0;
 
-    // Try each worker - busy workers return 423 instantly
-    for (let i = 1; i <= workerCount; i++) {
-      try {
-        const result = await this.search(prompt, i);
-        this.logger.log(`Worker ${i} completed job`);
+    // Keep trying until a worker is available
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      attempt++;
 
-        // If json is empty, use raw_text as fallback
-        const json = result.json || result.raw_text || '';
-        return { json, raw_text: result.raw_text, usedWorker: i };
-      } catch (err: unknown) {
-        const errTyped = err as ErrorWithExtras;
-        const errorMsg = errTyped?.message || String(err);
-        lastError = errTyped;
+      // Find a free worker first
+      const freeWorker = await this.findFreeWorker();
 
-        // Empty result (422) - job completes with raw_text only, no json
-        if (errorMsg.includes('422') || errorMsg.includes('empty_result')) {
-          const rawText = errTyped?.raw_text || '';
-          this.logger.warn(
-            `Worker ${i} returned empty result (422), raw_text: ${rawText.length} chars`,
-          );
-          return { json: '', raw_text: rawText, usedWorker: i };
-        }
+      if (freeWorker) {
+        try {
+          const result = await this.search(prompt, freeWorker);
+          this.logger.log(`Worker ${freeWorker} completed job`);
 
-        // Blocked by Google - fail immediately
-        if (errTyped?.blocked === true) {
-          throw err;
-        }
+          // If json is empty, use raw_text as fallback
+          const json = result.json || result.raw_text || '';
+          return { json, raw_text: result.raw_text, usedWorker: freeWorker };
+        } catch (err: unknown) {
+          const errTyped = err as ErrorWithExtras;
+          const errorMsg = errTyped?.message || String(err);
 
-        // Busy (423) or warming up (503) - try next worker instantly
-        const isBusy =
-          errorMsg.includes('423') ||
-          errorMsg.includes('Locked') ||
-          errorMsg.includes('busy');
-        const isWarmingUp =
-          errorMsg.includes('warming_up') || errorMsg.includes('warming up');
-        if (isBusy || isWarmingUp) {
-          this.logger.debug(
-            `Worker ${i} is ${isBusy ? 'busy' : 'warming up'}, trying next...`,
-          );
+          // Empty result (422) - job completes with raw_text only, no json
+          if (errorMsg.includes('422') || errorMsg.includes('empty_result')) {
+            const rawText = errTyped?.raw_text || '';
+            this.logger.warn(
+              `Worker ${freeWorker} returned empty result (422), raw_text: ${rawText.length} chars`,
+            );
+            return { json: '', raw_text: rawText, usedWorker: freeWorker };
+          }
+
+          // Blocked by Google - worker will rotate proxy, retry with another worker
+          if (errTyped?.blocked === true) {
+            this.logger.warn(
+              `Worker ${freeWorker} blocked by Google, proxy rotating - retrying...`,
+            );
+            continue;
+          }
+
+          // Worker became busy between health check and search - retry
+          const isBusy =
+            errorMsg.includes('423') ||
+            errorMsg.includes('Locked') ||
+            errorMsg.includes('busy');
+          if (isBusy) {
+            this.logger.debug(
+              `Worker ${freeWorker} became busy, retrying...`,
+            );
+            continue;
+          }
+
+          // Other error - log and retry with another worker
+          this.logger.warn(`Worker ${freeWorker} error: ${errorMsg}, retrying...`);
           continue;
         }
-
-        // Other error - try next worker
-        this.logger.warn(`Worker ${i} error: ${errorMsg}`);
       }
-    }
 
-    // All workers busy - throw to let Bull retry later
-    throw lastError || new Error('All workers are busy');
+      // No free workers - wait and retry
+      if (attempt % 10 === 0) {
+        this.logger.log(
+          `All workers busy, waiting... (attempt ${attempt})`,
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+    }
   }
 }
