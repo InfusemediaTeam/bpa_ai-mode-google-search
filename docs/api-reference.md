@@ -102,6 +102,77 @@ curl -X POST https://ai-search.instagingserver.com/api/v1/search-intelligence/se
 
 ---
 
+### Submit Bulk Prompts
+
+Submit multiple prompts for bulk asynchronous processing. All prompts are processed in parallel.
+
+```http
+POST /api/v1/search-intelligence/searcher/prompts/bulk
+```
+
+**Headers:**
+| Header | Required | Description |
+|--------|----------|-------------|
+| `X-Request-Id` | Yes | Request correlation ID |
+| `Content-Type` | Yes | `application/json` |
+
+**Query Parameters:**
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `worker` | No | Preferred worker ID (1-N) |
+
+**Request Body:**
+```json
+{
+  "prompts": [
+    { "prompt": "First search query" },
+    { "prompt": "Second search query" },
+    { "prompt": "Third search query" }
+  ]
+}
+```
+
+**Validation:**
+- Minimum: 1 prompt
+- Maximum: 100 prompts
+- Each prompt: max 10,000 characters
+
+**Response:** `202 Accepted`
+```json
+{
+  "data": {
+    "batchId": "batch_1234567890_abc123",
+    "jobIds": ["1", "2", "3"],
+    "count": 3
+  },
+  "meta": {
+    "requestId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "processingTimeMs": 45
+  }
+}
+```
+
+**Example:**
+```bash
+curl -X POST https://ai-search.instagingserver.com/api/v1/search-intelligence/searcher/prompts/bulk \
+  -H "Content-Type: application/json" \
+  -H "X-Request-Id: $(uuidgen)" \
+  -d '{
+    "prompts": [
+      { "prompt": "What is the email pattern for company.com?" },
+      { "prompt": "What is the email pattern for example.org?" }
+    ]
+  }'
+```
+
+**Notes:**
+- Each prompt creates a separate job that processes in parallel
+- All jobs share the same `batchId` for tracking
+- Jobs compete fairly with single prompts for worker resources
+- Use the batch status endpoint to track overall progress
+
+---
+
 ### Get Job Status
 
 Get the status and result of a job by ID.
@@ -154,6 +225,13 @@ GET /api/v1/search-intelligence/searcher/jobs/{jobId}
 | `completed` | Job finished successfully |
 | `failed` | Job failed after all retries |
 
+**Job Result Fields:**
+| Field | Description |
+|-------|-------------|
+| `json` | JSON result from search (primary) |
+| `raw_text` | Raw text content (fallback when json is empty) |
+| `usedWorker` | Worker ID that processed the job |
+
 **Error Response:** `404 Not Found`
 ```json
 {
@@ -172,6 +250,82 @@ GET /api/v1/search-intelligence/searcher/jobs/{jobId}
 curl https://ai-search.instagingserver.com/api/v1/search-intelligence/searcher/jobs/123 \
   -H "X-Request-Id: $(uuidgen)"
 ```
+
+---
+
+### Get Batch Status
+
+Get aggregated status of all jobs in a batch.
+
+```http
+GET /api/v1/search-intelligence/searcher/batches/{batchId}
+```
+
+**Headers:**
+| Header | Required | Description |
+|--------|----------|-------------|
+| `X-Request-Id` | Yes | Request correlation ID |
+
+**Path Parameters:**
+| Parameter | Description |
+|-----------|-------------|
+| `batchId` | Batch ID returned from POST /prompts/bulk |
+
+**Response:** `200 OK`
+```json
+{
+  "data": {
+    "batchId": "batch_1234567890_abc123",
+    "total": 10,
+    "completed": 7,
+    "processing": 2,
+    "pending": 0,
+    "failed": 1,
+    "jobs": [
+      {
+        "jobId": "1",
+        "status": "completed",
+        "result": {
+          "json": "...",
+          "raw_text": "...",
+          "usedWorker": 1
+        },
+        "error": null,
+        "createdAt": "2024-01-01T12:00:00.000Z",
+        "completedAt": "2024-01-01T12:00:05.000Z"
+      }
+    ]
+  },
+  "meta": {
+    "requestId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "processingTimeMs": 25
+  }
+}
+```
+
+**Error Response:** `404 Not Found`
+```json
+{
+  "error": {
+    "code": "NOT_FOUND",
+    "message": "Batch batch_1234567890_abc123 not found"
+  },
+  "meta": {
+    "requestId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+  }
+}
+```
+
+**Example:**
+```bash
+curl https://ai-search.instagingserver.com/api/v1/search-intelligence/searcher/batches/batch_1234567890_abc123 \
+  -H "X-Request-Id: $(uuidgen)"
+```
+
+**Notes:**
+- Jobs are returned sorted by their original order in the batch
+- Use this endpoint to monitor bulk operation progress
+- Poll this endpoint instead of checking each job individually
 
 ---
 
