@@ -2,13 +2,15 @@ import {
   Controller,
   Get,
   Post,
-  Param,
   Body,
+  Param,
   Query,
   Res,
   HttpException,
   HttpStatus,
   HttpCode,
+  Headers,
+  UseGuards,
 } from '@nestjs/common';
 import {
   ApiTags,
@@ -17,6 +19,7 @@ import {
   ApiHeader,
   ApiQuery,
 } from '@nestjs/swagger';
+import { ThrottlerGuard } from '@nestjs/throttler';
 import { Response } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -24,6 +27,7 @@ import { RedisService } from '../../../../modules/redis/redis.service';
 import { WorkerClientService } from '../../../../modules/worker/worker-client.service';
 import { SearcherService } from './services/searcher.service';
 import { CreatePromptDto } from './dto/create-prompt.dto';
+import { CreateBulkPromptsDto } from './dto/create-bulk-prompts.dto';
 
 /**
  * Searcher Controller
@@ -35,10 +39,16 @@ import { CreatePromptDto } from './dto/create-prompt.dto';
  */
 @ApiTags('search-intelligence/searcher')
 @Controller('api/v1/search-intelligence/searcher')
+@UseGuards(ThrottlerGuard)
 @ApiHeader({
   name: 'X-Request-Id',
   description: 'Request correlation ID',
   required: true,
+})
+@ApiHeader({
+  name: 'X-Idempotency-Key',
+  description: 'Idempotency key for safe retries (optional)',
+  required: false,
 })
 export class SearcherController {
   constructor(
@@ -62,14 +72,23 @@ export class SearcherController {
     description: 'Preferred worker ID (1-15)',
     type: Number,
   })
+  @ApiQuery({
+    name: 'priority',
+    required: false,
+    description: 'Job priority (higher = more urgent, default: 0)',
+    type: Number,
+  })
   @ApiResponse({ status: 202, description: 'Job accepted for processing' })
   @ApiResponse({ status: 400, description: 'Invalid request' })
   @ApiResponse({ status: 422, description: 'Validation error' })
   async createPrompt(
     @Body() dto: CreatePromptDto,
     @Query('worker') workerQuery?: string,
+    @Query('priority') priorityQuery?: string,
+    @Headers('x-idempotency-key') idempotencyKey?: string,
   ): Promise<{ jobId: string }> {
     let preferredWorker: number | undefined;
+    let priority: number | undefined;
 
     if (workerQuery !== undefined) {
       const n = Number(workerQuery);
@@ -88,11 +107,117 @@ export class SearcherController {
       preferredWorker = Math.trunc(n);
     }
 
+    if (priorityQuery !== undefined) {
+      const p = Number(priorityQuery);
+      if (!Number.isFinite(p)) {
+        throw new HttpException(
+          {
+            error: {
+              code: 'BAD_REQUEST',
+              message: 'Invalid priority parameter',
+              details: { field: 'priority', value: priorityQuery },
+            },
+          },
+          HttpStatus.BAD_REQUEST,
+        );
+      }
+      priority = Math.trunc(p);
+    }
+
     const jobId = await this.searcherService.enqueue(
       dto.prompt,
       preferredWorker,
+      idempotencyKey,
+      priority,
     );
     return { jobId };
+  }
+
+  /**
+   * Submit multiple prompts for bulk async processing
+   * Returns 202 Accepted with array of jobIds
+   */
+  @Post('prompts/bulk')
+  @HttpCode(HttpStatus.ACCEPTED)
+  @ApiOperation({ summary: 'Submit multiple prompts for bulk async processing' })
+  @ApiQuery({
+    name: 'worker',
+    required: false,
+    description: 'Preferred worker ID (1-15)',
+    type: Number,
+  })
+  @ApiQuery({
+    name: 'priority',
+    required: false,
+    description: 'Job priority for all prompts in batch (higher = more urgent, default: 0)',
+    type: Number,
+  })
+  @ApiResponse({
+    status: 202,
+    description: 'Bulk jobs accepted for processing',
+    schema: {
+      type: 'object',
+      properties: {
+        batchId: { type: 'string' },
+        jobIds: { type: 'array', items: { type: 'string' } },
+        count: { type: 'number' },
+      },
+    },
+  })
+  @ApiResponse({ status: 400, description: 'Invalid request' })
+  @ApiResponse({ status: 422, description: 'Validation error' })
+  async createBulkPrompts(
+    @Body() dto: CreateBulkPromptsDto,
+    @Query('worker') workerQuery?: string,
+    @Query('priority') priorityQuery?: string,
+    @Headers('x-idempotency-key') idempotencyKey?: string,
+  ): Promise<{ batchId: string; jobIds: string[]; count: number }> {
+    let preferredWorker: number | undefined;
+    let priority: number | undefined;
+
+    if (workerQuery !== undefined) {
+      const n = Number(workerQuery);
+      if (!Number.isFinite(n) || n < 1) {
+        throw new HttpException(
+          {
+            error: {
+              code: 'BAD_REQUEST',
+              message: 'Invalid worker parameter',
+              details: { field: 'worker', value: workerQuery },
+            },
+          },
+          HttpStatus.BAD_REQUEST,
+        );
+      }
+      preferredWorker = Math.trunc(n);
+    }
+
+    if (priorityQuery !== undefined) {
+      const p = Number(priorityQuery);
+      if (!Number.isFinite(p)) {
+        throw new HttpException(
+          {
+            error: {
+              code: 'BAD_REQUEST',
+              message: 'Invalid priority parameter',
+              details: { field: 'priority', value: priorityQuery },
+            },
+          },
+          HttpStatus.BAD_REQUEST,
+        );
+      }
+      priority = Math.trunc(p);
+    }
+
+    const prompts = dto.prompts.map((item) => item.prompt);
+    const result = await this.searcherService.enqueueBulk(
+      prompts,
+      preferredWorker,
+      idempotencyKey,
+      priority,
+    );
+
+    return { ...result, count: prompts.length };
   }
 
   // ==================== JOBS ====================
@@ -106,6 +231,45 @@ export class SearcherController {
   @ApiResponse({ status: 404, description: 'Job not found' })
   async getJobStatus(@Param('jobId') jobId: string) {
     return await this.searcherService.getStatus(jobId);
+  }
+
+  /**
+   * Get batch status by batch ID
+   */
+  @Get('batches/:batchId')
+  @ApiOperation({ summary: 'Get batch status by batch ID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Batch status retrieved',
+    schema: {
+      type: 'object',
+      properties: {
+        batchId: { type: 'string' },
+        total: { type: 'number' },
+        completed: { type: 'number' },
+        processing: { type: 'number' },
+        pending: { type: 'number' },
+        failed: { type: 'number' },
+        jobs: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              jobId: { type: 'string' },
+              status: { type: 'string' },
+              result: { type: 'object', nullable: true },
+              error: { type: 'string', nullable: true },
+              createdAt: { type: 'string' },
+              completedAt: { type: 'string', nullable: true },
+            },
+          },
+        },
+      },
+    },
+  })
+  @ApiResponse({ status: 404, description: 'Batch not found' })
+  async getBatchStatus(@Param('batchId') batchId: string) {
+    return await this.searcherService.getBatchStatus(batchId);
   }
 
   /**
