@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { BullModule } from '@nestjs/bull';
 import { ConfigModule, ConfigService } from '@nestjs/config';
+import { ThrottlerModule } from '@nestjs/throttler';
 import { LoggingModule } from './modules/logging/logging.module';
 import { RedisModule } from './modules/redis/redis.module';
 import { SearcherModule } from './api/v1/search-intelligence/searcher/searcher.module';
@@ -13,6 +14,10 @@ import { validate } from './config/env.validation';
       isGlobal: true,
       validate, // Validate all required env vars on startup
     }),
+    ThrottlerModule.forRoot([{
+      ttl: 60000, // 1 minute
+      limit: 100, // 100 requests per minute per IP
+    }]),
     AppConfigModule,
     LoggingModule,
     RedisModule,

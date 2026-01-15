@@ -320,15 +320,41 @@ export class WorkerClientService implements OnModuleInit {
 
   async searchWithRetry(
     prompt: string,
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    _preferredWorker?: number,
+    preferredWorker?: number,
   ): Promise<SearchResult & { usedWorker: number }> {
     const retryDelayMs = 2000; // Wait 2 seconds between retries
+    const maxAttempts = this.timeouts.retry.maxAttempts * 10; // 30 attempts max (circuit breaker)
     let attempt = 0;
 
-    // Keep trying until a worker is available
-    // eslint-disable-next-line no-constant-condition
-    while (true) {
+    // Try preferred worker first if specified and valid
+    if (preferredWorker && preferredWorker >= 1 && preferredWorker <= this.getWorkerCount()) {
+      try {
+        const health = await this.health(preferredWorker);
+        if (health.ok && !health.busy && health.ready !== false) {
+          this.logger.log(`Trying preferred worker ${preferredWorker}`);
+          const result = await this.search(prompt, preferredWorker);
+          this.logger.log(`Preferred worker ${preferredWorker} completed job`);
+          const json = result.json || result.raw_text || '';
+          return { json, raw_text: result.raw_text, usedWorker: preferredWorker };
+        }
+      } catch (err: unknown) {
+        const errTyped = err as ErrorWithExtras;
+        const errorMsg = errTyped?.message || String(err);
+        
+        // Empty result - return immediately
+        if (errorMsg.includes('422') || errorMsg.includes('empty_result')) {
+          const rawText = errTyped?.raw_text || '';
+          this.logger.warn(`Preferred worker ${preferredWorker} returned empty result`);
+          return { json: '', raw_text: rawText, usedWorker: preferredWorker };
+        }
+        
+        // Other errors - fall through to dynamic selection
+        this.logger.warn(`Preferred worker ${preferredWorker} failed: ${errorMsg}, falling back to dynamic selection`);
+      }
+    }
+
+    // Dynamic worker selection with circuit breaker
+    while (attempt < maxAttempts) {
       attempt++;
 
       // Find a free worker first
@@ -384,10 +410,18 @@ export class WorkerClientService implements OnModuleInit {
       // No free workers - wait and retry
       if (attempt % 10 === 0) {
         this.logger.log(
-          `All workers busy, waiting... (attempt ${attempt})`,
+          `All workers busy, waiting... (attempt ${attempt}/${maxAttempts})`,
         );
       }
       await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
     }
+
+    // Circuit breaker triggered - all attempts exhausted
+    this.logger.error(
+      `Circuit breaker triggered: Max attempts (${maxAttempts}) exhausted. All workers unavailable.`,
+    );
+    throw new Error(
+      `Search failed: All workers unavailable after ${maxAttempts} attempts. Check worker health.`,
+    );
   }
 }
